@@ -780,7 +780,17 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
     try {
       const tCreated = Date.parse(existingTarget.created_at || 0) || 0;
       const pCreated = Date.parse(pivot.created_at || 0) || 0;
-      if (tCreated >= pCreated) {
+      // Also detect legacy rows where the title wasn't translated (title equals pivot title but languages differ)
+      const needsRefreshTitle =
+        (existingTarget.ai_title || "") === (pivot.ai_title || "") &&
+        (existingTarget.lang || "") !== (pivot.lang || "");
+      // Detect stub marker from earlier fallback translations
+      const stubMarker = " [translated]";
+      const hasStubMarker =
+        (existingTarget.ai_title || "").includes(stubMarker) ||
+        (existingTarget.ai_summary || "").includes(stubMarker) ||
+        (existingTarget.ai_details || "").includes(stubMarker);
+      if (tCreated >= pCreated && !needsRefreshTitle && !hasStubMarker) {
         // Fresh enough
         return {
           ...existingTarget,
@@ -788,7 +798,7 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
           translated_from: null,
         };
       }
-      // Stale: re-translate from pivot and replace current
+      // Stale or legacy untranslated title: re-translate from pivot and replace current
       const translated = await translateNow(pivot, pivot.lang, targetLang);
       // Best-effort swap: mark old false, insert new true (avoid unique violation)
       await supabase
@@ -850,18 +860,28 @@ async function translateNow(pivot, srcLang, dstLang) {
   if (!d || s === d) return { ...pivot };
   // Prefer cached text translation when available; fallback to tag
   const tag = process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
+  const ai_title = await translateTextCached(pivot.ai_title || "", {
+    srcLang: s,
+    dstLang: d,
+  }).catch(() => (pivot.ai_title || "") + tag);
+  const ai_summary = await translateTextCached(pivot.ai_summary || "", {
+    srcLang: s,
+    dstLang: d,
+  }).catch(() => (pivot.ai_summary || "") + tag);
+  const ai_details = await translateTextCached(
+    pivot.ai_details || pivot.ai_summary || "",
+    { srcLang: s, dstLang: d }
+  ).catch(() => (pivot.ai_details || pivot.ai_summary || "") + tag);
+  const clean = (v) => (v || "").replace(/\s+$/g, "");
+  const tTitle = clean(ai_title);
+  const tSummary = clean(ai_summary);
+  const tDetails = clean(ai_details);
   return {
     id: pivot.id,
     lang: d,
-    ai_title: pivot.ai_title,
-    ai_summary: await translateTextCached(pivot.ai_summary || "", {
-      srcLang: s,
-      dstLang: d,
-    }).catch(() => (pivot.ai_summary || "") + tag),
-    ai_details: await translateTextCached(
-      pivot.ai_details || pivot.ai_summary || "",
-      { srcLang: s, dstLang: d }
-    ).catch(() => (pivot.ai_details || pivot.ai_summary || "") + tag),
+    ai_title: tTitle,
+    ai_summary: tSummary,
+    ai_details: tDetails,
     is_current: true,
   };
 }

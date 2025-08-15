@@ -61,8 +61,97 @@ function keyFor(text, src, dst) {
 }
 
 async function translateViaProvider(text, srcLang, dstLang) {
-  // Placeholder: plug real provider here (Gemini/DeepL/etc). Must return the translated string.
-  // For now, we simulate a deterministic cheap translation by returning input + marker.
+  const provider = (process.env.MT_PROVIDER || "").toLowerCase();
+  // Gemini (Generative Language API)
+  if (provider === "gemini" && process.env.GEMINI_API_KEY) {
+    const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const prompt = `Translate the following text from ${
+      srcLang || "auto"
+    } to ${dstLang}. Return only the translation with no extra words or quotes.\n\n${text}`;
+    const body = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: { temperature: 0 },
+    };
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(`Gemini HTTP ${resp.status}`);
+    const json = await resp.json();
+    const out = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!out) throw new Error("Gemini no translation");
+    return out;
+  }
+  // OpenAI Chat Completions
+  if (provider === "openai" && process.env.OPENAI_API_KEY) {
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a high-quality translator. Return only the translated text, no commentary, no quotes.",
+          },
+          {
+            role: "user",
+            content: `Translate from ${
+              srcLang || "auto"
+            } to ${dstLang}:\n\n${text}`,
+          },
+        ],
+      }),
+    });
+    if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}`);
+    const json = await resp.json();
+    const out = json?.choices?.[0]?.message?.content;
+    if (!out) throw new Error("OpenAI no translation");
+    return out.trim();
+  }
+  // DeepL
+  if (provider === "deepl" && process.env.DEEPL_API_KEY) {
+    // Map BCP-47 → DeepL code (best-effort): keep region if present, else primary upper
+    const norm = (tag) => {
+      if (!tag) return undefined;
+      const [p, region] = String(tag).split("-");
+      if (region) return `${p.toUpperCase()}-${region.toUpperCase()}`;
+      return p.toUpperCase();
+    };
+    const target = norm(dstLang);
+    const source = srcLang && srcLang !== "auto" ? norm(srcLang) : undefined;
+    const apiUrl =
+      process.env.DEEPL_API_URL || "https://api-free.deepl.com/v2/translate";
+    const params = new URLSearchParams();
+    params.set("auth_key", process.env.DEEPL_API_KEY);
+    params.set("text", text);
+    params.set("target_lang", target);
+    if (source) params.set("source_lang", source);
+    const resp = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+    if (!resp.ok) throw new Error(`DeepL HTTP ${resp.status}`);
+    const json = await resp.json();
+    const out = json?.translations?.[0]?.text;
+    if (!out) throw new Error("DeepL no translation");
+    return out;
+  }
+  // Default fallback: return original + optional marker
   const marker =
     process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
   return text + marker;
