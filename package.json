@@ -1,0 +1,24 @@
+{
+  "name": "insight-bff-supabase",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "deploy:functions": "bash scripts/deploy-all-functions.sh",
+    "test": "vitest run --reporter=dot",
+    "test:watch": "vitest",
+    "dev": "nodemon server.mjs",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.43.4",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9",
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

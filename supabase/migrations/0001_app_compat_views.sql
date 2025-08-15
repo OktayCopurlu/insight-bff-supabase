@@ -1,0 +1,2 @@
+-- (No-op) Legacy compatibility views removed. Keeping file to preserve migration order.
+-- Intentionally empty.

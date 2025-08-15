@@ -1,0 +1,31 @@
+### Basic integration tests (use with REST Client extension or curl manually)
+
+# 1. List articles
+GET {{BASE_URL}}/functions/v1/news-processor/articles
+
+# 2. Get single article (replace ARTICLE_ID after first list)
+GET {{BASE_URL}}/functions/v1/news-processor/articles/ARTICLE_ID
+
+# 3. Generate explanation
+POST {{BASE_URL}}/functions/v1/news-processor/articles/ARTICLE_ID/explanation
+
+# 4. Chat (simple)
+POST {{BASE_URL}}/functions/v1/ai-chat/chat
+Content-Type: application/json
+
+{
+  "articleId": "ARTICLE_ID",
+  "message": "Summarize this in one sentence",
+  "chatHistory": []
+}
+
+# 5. Coverage analyze (ephemeral)
+POST {{BASE_URL}}/functions/v1/coverage-analyzer/analyze
+Content-Type: application/json
+
+{
+  "articleId": "ARTICLE_ID"
+}
+
+# 6. Quiz placeholder
+GET {{BASE_URL}}/functions/v1/quiz-generator/quiz/ARTICLE_ID
