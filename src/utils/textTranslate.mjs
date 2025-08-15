@@ -4,6 +4,7 @@
 
 import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -20,9 +21,13 @@ const MAX_CACHE = parseInt(process.env.TRANSLATION_CACHE_MAX || "500");
 const cache = new Map(); // key -> text
 
 // Timeouts and retry knobs
-const MT_TIMEOUT_MS = parseInt(process.env.MT_TIMEOUT_MS || "1200");
-const MT_RETRIES = parseInt(process.env.MT_RETRIES || "2");
-const MT_BACKOFF_MS = parseInt(process.env.MT_BACKOFF_MS || "150");
+// Slightly higher defaults to reduce spurious timeouts under load
+const MT_TIMEOUT_MS = parseInt(process.env.MT_TIMEOUT_MS || "3000");
+const MT_RETRIES = parseInt(process.env.MT_RETRIES || "3");
+const MT_BACKOFF_MS = parseInt(process.env.MT_BACKOFF_MS || "200");
+// Chunking to improve reliability for long texts
+const MT_CHUNK_THRESHOLD = parseInt(process.env.MT_CHUNK_THRESHOLD || "1200");
+const MT_CHUNK_MAX = parseInt(process.env.MT_CHUNK_MAX || "1600");
 
 function withTimeout(promiseLike, ms, label = "op") {
   let to;
@@ -60,111 +65,104 @@ function keyFor(text, src, dst) {
   return `${src}->${dst}:${h}`;
 }
 
+function splitIntoChunks(text, maxLen) {
+  const t = String(text || "");
+  if (t.length <= maxLen) return [t];
+  const chunks = [];
+  const sentences = t.match(/[^.!?\n]+[.!?\n]*/g) || [t];
+  let buf = "";
+  for (const s of sentences) {
+    if ((buf + s).length > maxLen && buf) {
+      chunks.push(buf);
+      buf = s;
+    } else {
+      buf += s;
+    }
+  }
+  if (buf) chunks.push(buf);
+  // If any chunk still too large (very long sentence), hard split
+  const out = [];
+  for (const c of chunks) {
+    if (c.length <= maxLen) out.push(c);
+    else {
+      for (let i = 0; i < c.length; i += maxLen)
+        out.push(c.slice(i, i + maxLen));
+    }
+  }
+  return out;
+}
+
+// Normalize language tags and map to provider-appropriate targets
+function baseLang(tag) {
+  return (String(tag || "").split("-")[0] || "").toLowerCase();
+}
+const langName = (b) =>
+  ({
+    en: "English",
+    de: "German",
+    tr: "Turkish",
+    fr: "French",
+    es: "Spanish",
+    it: "Italian",
+    ar: "Arabic",
+    ru: "Russian",
+    ja: "Japanese",
+    zh: "Chinese",
+    pt: "Portuguese",
+    nl: "Dutch",
+    pl: "Polish",
+  }[b] || b);
+
+function providerTarget(dstLang) {
+  // For Gemini, prefer human-readable language names and ignore region
+  return langName(baseLang(dstLang));
+}
+
+// Gemini client (align with feeder's @google/generative-ai usage)
+const GEMINI_API_KEY = process.env.LLM_API_KEY || process.env.GEMINI_API_KEY;
+const GEMINI_MODEL =
+  process.env.LLM_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+
 async function translateViaProvider(text, srcLang, dstLang) {
-  const provider = (process.env.MT_PROVIDER || "").toLowerCase();
-  // Gemini (Generative Language API)
-  if (provider === "gemini" && process.env.GEMINI_API_KEY) {
-    const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const prompt = `Translate the following text from ${
-      srcLang || "auto"
-    } to ${dstLang}. Return only the translation with no extra words or quotes.\n\n${text}`;
-    const body = {
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
-      generationConfig: { temperature: 0 },
-    };
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(`Gemini HTTP ${resp.status}`);
-    const json = await resp.json();
-    const out = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!out) throw new Error("Gemini no translation");
-    return out;
-  }
-  // OpenAI Chat Completions
-  if (provider === "openai" && process.env.OPENAI_API_KEY) {
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a high-quality translator. Return only the translated text, no commentary, no quotes.",
-          },
-          {
-            role: "user",
-            content: `Translate from ${
-              srcLang || "auto"
-            } to ${dstLang}:\n\n${text}`,
-          },
-        ],
-      }),
-    });
-    if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}`);
-    const json = await resp.json();
-    const out = json?.choices?.[0]?.message?.content;
-    if (!out) throw new Error("OpenAI no translation");
-    return out.trim();
-  }
-  // DeepL
-  if (provider === "deepl" && process.env.DEEPL_API_KEY) {
-    // Map BCP-47 → DeepL code (best-effort): keep region if present, else primary upper
-    const norm = (tag) => {
-      if (!tag) return undefined;
-      const [p, region] = String(tag).split("-");
-      if (region) return `${p.toUpperCase()}-${region.toUpperCase()}`;
-      return p.toUpperCase();
-    };
-    const target = norm(dstLang);
-    const source = srcLang && srcLang !== "auto" ? norm(srcLang) : undefined;
-    const apiUrl =
-      process.env.DEEPL_API_URL || "https://api-free.deepl.com/v2/translate";
-    const params = new URLSearchParams();
-    params.set("auth_key", process.env.DEEPL_API_KEY);
-    params.set("text", text);
-    params.set("target_lang", target);
-    if (source) params.set("source_lang", source);
-    const resp = await fetch(apiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params,
-    });
-    if (!resp.ok) throw new Error(`DeepL HTTP ${resp.status}`);
-    const json = await resp.json();
-    const out = json?.translations?.[0]?.text;
-    if (!out) throw new Error("DeepL no translation");
-    return out;
-  }
-  // Default fallback: return original + optional marker
-  const marker =
-    process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
-  return text + marker;
+  if (!genAI) throw new Error("Gemini API key missing");
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    generationConfig: { temperature: 0, maxOutputTokens: 512 },
+  });
+  const prompt = `Translate the following text from ${
+    srcLang || "auto"
+  } to ${providerTarget(
+    dstLang
+  )}. Return only the translation with no extra words or quotes.\n\n${text}`;
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const out =
+    response?.text?.() || response?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!out) throw new Error("Gemini no translation");
+  return out;
+}
+
+function availableProviders() {
+  // Single provider: Gemini only
+  return GEMINI_API_KEY ? ["gemini"] : [];
 }
 
 async function attemptTranslateWithRetries(text, srcLang, dstLang) {
   let lastErr = null;
+  const providers = availableProviders();
+  if (!providers.length) {
+    const marker =
+      process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
+    return text + marker;
+  }
+  // Single-provider retry loop (Gemini)
   for (let i = 0; i <= MT_RETRIES; i++) {
     try {
       const out = await withTimeout(
         translateViaProvider(text, srcLang, dstLang),
         MT_TIMEOUT_MS,
-        "translate provider"
+        "translate provider (gemini)"
       );
       return out;
     } catch (e) {
@@ -172,11 +170,10 @@ async function attemptTranslateWithRetries(text, srcLang, dstLang) {
       if (i < MT_RETRIES) await sleep(MT_BACKOFF_MS * (i + 1));
     }
   }
-  // Fallback: ensure we still return a target-appropriate string even if provider repeatedly failed
   const marker =
     process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
   console.warn(
-    "translateTextCached: provider failed, returning fallback:",
+    "translateTextCached: provider failed across all options, returning fallback:",
     lastErr?.message || lastErr
   );
   return text + marker;
@@ -184,7 +181,10 @@ async function attemptTranslateWithRetries(text, srcLang, dstLang) {
 
 export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
   if (!text || !dstLang) return text;
-  const key = keyFor(text, srcLang, dstLang);
+  if (text.length < 2) return text;
+  // Normalize destination to its base to improve cache reuse across regional variants
+  const cacheDst = baseLang(dstLang) || dstLang;
+  const key = keyFor(text, srcLang, cacheDst);
   // memory
   if (cache.has(key)) return cache.get(key);
   // db
@@ -205,15 +205,53 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
       }
     } catch (_) {}
   }
-  // provider with short retries and timeout
-  const out = await attemptTranslateWithRetries(text, srcLang, dstLang);
+  // Chunk if long to reduce provider timeouts
+  let out;
+  if (text.length >= MT_CHUNK_THRESHOLD) {
+    const parts = splitIntoChunks(text, MT_CHUNK_MAX);
+    const translatedParts = [];
+    for (const part of parts) {
+      const partKey = keyFor(part, srcLang, cacheDst);
+      if (cache.has(partKey)) {
+        translatedParts.push(cache.get(partKey));
+        continue;
+      }
+      console.log("part", part);
+      let translated = await attemptTranslateWithRetries(
+        part,
+        srcLang,
+        dstLang
+      );
+      lruSet(partKey, translated);
+      // Optional: persist chunk to DB cache as well
+      if (supabase) {
+        try {
+          await withTimeout(
+            supabase.from("translations").insert({
+              key: partKey,
+              src_lang: srcLang,
+              dst_lang: cacheDst,
+              text: translated,
+            }),
+            800,
+            "translations insert (chunk)"
+          );
+        } catch (_) {}
+      }
+      translatedParts.push(translated);
+    }
+    out = translatedParts.join("");
+  } else {
+    // provider with short retries and timeout
+    out = await attemptTranslateWithRetries(text, srcLang, dstLang);
+  }
   lruSet(key, out);
   if (supabase) {
     try {
       await withTimeout(
         supabase
           .from("translations")
-          .insert({ key, src_lang: srcLang, dst_lang: dstLang, text: out }),
+          .insert({ key, src_lang: srcLang, dst_lang: cacheDst, text: out }),
         800,
         "translations insert"
       );

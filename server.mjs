@@ -630,19 +630,103 @@ app.post("/cluster/:id/chat", langMiddleware, async (req, res) => {
     userId,
   });
 
-  // Stub AI reply in the target language via simple template; translate if needed
-  let reply = `Yanıt (demo): ${message}`; // default non-English
-  if (target?.startsWith("en")) reply = `Answer (demo): ${message}`;
-  else if (target?.startsWith("de")) reply = `Antwort (Demo): ${message}`;
-  else if (target?.startsWith("tr")) reply = `Yanıt (demo): ${message}`;
-  else if (target?.startsWith("ar")) reply = `رد (تجريبي): ${message}`;
-  // Best-effort enforce target via cached translator
-  try {
-    reply = await translateTextCached(reply, {
-      srcLang: "auto",
-      dstLang: target,
-    });
-  } catch (_) {}
+  // Try real LLM reply using Gemini when API key is available; fallback to demo template otherwise
+  let reply;
+  const apiKey = process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || "";
+  const modelId =
+    process.env.LLM_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  if (apiKey) {
+    try {
+      // Gather brief cluster context in target language
+      const ensured = await ensureClusterTextInLang(cluster.id, target);
+      // Fetch recent timeline updates (translate on the fly like in GET /cluster/:id)
+      const { data: updates } = await withTimeout(
+        supabase
+          .from("cluster_updates")
+          .select("id,claim,summary,source_id,lang,happened_at,created_at")
+          .eq("cluster_id", id)
+          .order("happened_at", { ascending: false })
+          .limit(5),
+        2000,
+        "chat timeline"
+      );
+      const upTranslated = [];
+      for (const u of updates || []) {
+        const baseText = u.summary || u.claim || "";
+        const src = normalizeBcp47(u.lang || "");
+        const base = (t) => (t || "").split("-")[0].toLowerCase();
+        const needs = src && base(src) !== base(target);
+        let text = baseText;
+        if (needs) {
+          try {
+            text = await translateTextCached(baseText, {
+              srcLang: src,
+              dstLang: target,
+            });
+          } catch (_) {
+            const t =
+              process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
+            text = baseText + t;
+          }
+        }
+        upTranslated.push({
+          id: u.id,
+          text,
+          happened_at: u.happened_at || u.created_at,
+        });
+      }
+      const citations = await getClusterCitations(id, 3);
+
+      // Compose a concise, grounded prompt and ask Gemini to answer in target language
+      const instructions = [
+        `You are a helpful news assistant. Answer in ${target} only.`,
+        `Be concise (<= 150 words) unless the user asks for more.`,
+        `Base your answer on the provided cluster summary, timeline, and citations.`,
+        `If uncertain, say you don't have enough info. Do not invent facts.`,
+      ].join("\n");
+      const summaryPart = ensured?.ai_summary
+        ? `Summary: ${ensured.ai_summary}`
+        : "";
+      const timelinePart = upTranslated.length
+        ? `Timeline:\n- ${upTranslated.map((u) => u.text).join("\n- ")}`
+        : "";
+      const sourcesPart = citations.length
+        ? `Sources:\n- ${citations
+            .map((c) => `${c.source_name || "Source"}: ${c.title}`)
+            .join("\n- ")}`
+        : "";
+      const context = [summaryPart, timelinePart, sourcesPart]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: modelId });
+      const prompt = [
+        instructions,
+        `Question: ${message}`,
+        context ? `\n\nContext:\n${context}` : "",
+      ].join("\n\n");
+      const resp = await withTimeout(
+        model.generateContent(prompt),
+        8000,
+        "gemini chat"
+      );
+      const txt = resp?.response?.text?.() || "";
+      reply = (txt || "").trim();
+      if (!reply) throw new Error("empty gemini reply");
+    } catch (e) {
+      console.warn("[chat] gemini failed, falling back to demo:", e.message);
+    }
+  }
+  if (!reply) {
+    // Demo fallback
+    if (target?.startsWith("en")) reply = `Answer (demo): ${message}`;
+    else if (target?.startsWith("de")) reply = `Antwort (Demo): ${message}`;
+    else if (target?.startsWith("tr")) reply = `Yanıt (demo): ${message}`;
+    else if (target?.startsWith("ar")) reply = `رد (تجريبي): ${message}`;
+    else reply = `Answer (demo): ${message}`;
+  }
 
   history.push({
     id: genId("m_"),
@@ -749,7 +833,16 @@ function startServer(startPort, attempts = 5) {
   });
 }
 
-startServer(PORT);
+// Only auto-start the server outside of test environments
+if (
+  process.env.NODE_ENV !== "test" &&
+  process.env.BFF_AUTO_LISTEN !== "false"
+) {
+  startServer(PORT);
+}
+
+// Export the Express app for testing
+export { app };
 
 // -------------------- Multilingual cluster-first endpoints --------------------
 
@@ -781,8 +874,15 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
       const tCreated = Date.parse(existingTarget.created_at || 0) || 0;
       const pCreated = Date.parse(pivot.created_at || 0) || 0;
       // Also detect legacy rows where the title wasn't translated (title equals pivot title but languages differ)
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
       const needsRefreshTitle =
-        (existingTarget.ai_title || "") === (pivot.ai_title || "") &&
+        norm(existingTarget.ai_title) === norm(pivot.ai_title) &&
+        (existingTarget.lang || "") !== (pivot.lang || "");
+      const needsRefreshSummary =
+        norm(existingTarget.ai_summary) === norm(pivot.ai_summary) &&
+        (existingTarget.lang || "") !== (pivot.lang || "");
+      const needsRefreshDetails =
+        norm(existingTarget.ai_details) === norm(pivot.ai_details) &&
         (existingTarget.lang || "") !== (pivot.lang || "");
       // Detect stub marker from earlier fallback translations
       const stubMarker = " [translated]";
@@ -790,7 +890,13 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
         (existingTarget.ai_title || "").includes(stubMarker) ||
         (existingTarget.ai_summary || "").includes(stubMarker) ||
         (existingTarget.ai_details || "").includes(stubMarker);
-      if (tCreated >= pCreated && !needsRefreshTitle && !hasStubMarker) {
+      if (
+        tCreated >= pCreated &&
+        !needsRefreshTitle &&
+        !needsRefreshSummary &&
+        !needsRefreshDetails &&
+        !hasStubMarker
+      ) {
         // Fresh enough
         return {
           ...existingTarget,
@@ -858,6 +964,9 @@ async function translateNow(pivot, srcLang, dstLang) {
   const s = normalizeBcp47(srcLang);
   const d = normalizeBcp47(dstLang);
   if (!d || s === d) return { ...pivot };
+  // Short-circuit if base language matches (e.g., en vs en-US)
+  const base = (t) => (t || "").split("-")[0].toLowerCase();
+  if (base(s) === base(d)) return { ...pivot };
   // Prefer cached text translation when available; fallback to tag
   const tag = process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
   const ai_title = await translateTextCached(pivot.ai_title || "", {
@@ -990,11 +1099,6 @@ app.get("/feed", langMiddleware, async (req, res) => {
       });
     }
     res.json(cards);
-    console.log(
-      `[BFF:/feed] clusters=${clusters.length} returned=${cards.length} in ${
-        Date.now() - t0
-      }ms lang=${target}`
-    );
   } catch (err) {
     console.error("/feed failed", err.message);
     res.status(500).json({ error: "Failed to load feed" });
@@ -1058,6 +1162,7 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
     if (clErr || !cluster) return res.status(404).json({ error: "Not found" });
 
     const ensured = await ensureClusterTextInLang(cluster.id, target);
+
     if (!ensured) return res.status(404).json({ error: "No text for cluster" });
 
     // Timeline (translate on the fly; do not persist for now)
@@ -1074,7 +1179,8 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
     for (const u of updates || []) {
       const baseText = u.summary || u.claim || "";
       const src = normalizeBcp47(u.lang || "");
-      const needs = src && src !== target;
+      const base = (t) => (t || "").split("-")[0].toLowerCase();
+      const needs = src && base(src) !== base(target);
       let text = baseText;
       if (needs) {
         try {
@@ -1139,10 +1245,35 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
     // Citations (top 3)
     const citations = await getClusterCitations(id, 3);
 
+    // Compose richer details when ai_details is missing or too short
+    const strip = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const sameAsSummary =
+      strip(ensured.ai_details) && strip(ensured.ai_summary)
+        ? strip(ensured.ai_details) === strip(ensured.ai_summary)
+        : false;
+    let composedDetails = ensured.ai_details || "";
+    if (!composedDetails || composedDetails.length < 240 || sameAsSummary) {
+      const parts = [];
+      if (ensured.ai_summary) parts.push(ensured.ai_summary.trim());
+      if (upTranslated && upTranslated.length) {
+        const top = upTranslated.slice(0, 5); // cap to avoid very long responses
+        const bullets = top.map((u) => `• ${u.text}`).join("\n");
+        parts.push("\nTimeline updates:\n" + bullets);
+      }
+      if (citations && citations.length) {
+        const cites = citations
+          .map((c) => `• ${c.source_name || "Source"}: ${c.title}`)
+          .join("\n");
+        parts.push("\nSources:\n" + cites);
+      }
+      composedDetails = parts.filter(Boolean).join("\n\n");
+    }
+
     res.json({
       id: cluster.id,
       title: ensured.ai_title,
       summary: ensured.ai_summary,
+      ai_details: composedDetails,
       language: target,
       is_translated: ensured.is_translated || false,
       translated_from: ensured.translated_from || null,
