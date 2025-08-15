@@ -172,10 +172,7 @@ async function attemptTranslateWithRetries(text, srcLang, dstLang) {
   }
   const marker =
     process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
-  console.warn(
-    "translateTextCached: provider failed across all options, returning fallback:",
-    lastErr?.message || lastErr
-  );
+
   return text + marker;
 }
 
@@ -216,7 +213,6 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
         translatedParts.push(cache.get(partKey));
         continue;
       }
-      console.log("part", part);
       let translated = await attemptTranslateWithRetries(
         part,
         srcLang,
