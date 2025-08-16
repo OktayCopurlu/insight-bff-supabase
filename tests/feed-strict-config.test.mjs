@@ -210,6 +210,11 @@ vi.mock("../src/utils/textTranslate.mjs", () => ({
   translateTextCached: vi.fn(
     async (text, { dstLang }) => `(${dstLang}) ${text}`
   ),
+  translateFieldsCached: vi.fn(async ({ title, summary, details }, { dstLang }) => ({
+    title: `(${dstLang}) ${title}`,
+    summary: `(${dstLang}) ${summary}`,
+    details: `(${dstLang}) ${details}`,
+  })),
 }));
 
 import { app } from "../server.mjs";

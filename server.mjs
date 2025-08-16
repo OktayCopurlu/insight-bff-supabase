@@ -9,7 +9,10 @@ import {
   isRtlLang as _isRtl,
   dirFor as _dirFor,
 } from "./src/utils/lang.mjs";
-import { translateTextCached, translateFieldsCached } from "./src/utils/textTranslate.mjs";
+import {
+  translateTextCached,
+  translateFieldsCached,
+} from "./src/utils/textTranslate.mjs";
 
 // Load .env manually (simple parser) if not already loaded
 (function loadEnv() {

@@ -270,8 +270,10 @@ export async function translateFieldsCached(
   const kSummary = summary ? keyFor(summary, srcLang, cacheDst) : null;
   const kDetails = details ? keyFor(details, srcLang, cacheDst) : null;
   const hitTitle = kTitle && cache.has(kTitle) ? cache.get(kTitle) : null;
-  const hitSummary = kSummary && cache.has(kSummary) ? cache.get(kSummary) : null;
-  const hitDetails = kDetails && cache.has(kDetails) ? cache.get(kDetails) : null;
+  const hitSummary =
+    kSummary && cache.has(kSummary) ? cache.get(kSummary) : null;
+  const hitDetails =
+    kDetails && cache.has(kDetails) ? cache.get(kDetails) : null;
   const allHit =
     (title ? !!hitTitle : true) &&
     (summary ? !!hitSummary : true) &&
@@ -374,7 +376,12 @@ export async function translateFieldsCached(
         await withTimeout(
           supabase
             .from("translations")
-            .insert({ key: k, src_lang: srcLang, dst_lang: cacheDst, text: translated }),
+            .insert({
+              key: k,
+              src_lang: srcLang,
+              dst_lang: cacheDst,
+              text: translated,
+            }),
           800,
           "translations insert (fields)"
         );
