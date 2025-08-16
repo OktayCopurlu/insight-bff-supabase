@@ -17,16 +17,21 @@ describe("translateMetrics counters", () => {
     const text = `hello world ${Date.now()}`; // unique key per run
     const opts = { srcLang: "en", dstLang: "tr" };
 
-    const first = await step("When I translate a unique text (miss)", async () =>
-      translateTextCached(text, opts)
+    const first = await step(
+      "When I translate a unique text (miss)",
+      async () => translateTextCached(text, opts)
     );
-    await step("Then the first result is a string and misses increase", async () => {
-      expect(typeof first).toBe("string");
-      expect(translateMetrics.cacheMisses).toBeGreaterThan(baseMisses);
-    });
+    await step(
+      "Then the first result is a string and misses increase",
+      async () => {
+        expect(typeof first).toBe("string");
+        expect(translateMetrics.cacheMisses).toBeGreaterThan(baseMisses);
+      }
+    );
 
-    const second = await step("When I translate the same text again (hit)", async () =>
-      translateTextCached(text, opts)
+    const second = await step(
+      "When I translate the same text again (hit)",
+      async () => translateTextCached(text, opts)
     );
     await step("Then it returns from cache and hits increase", async () => {
       expect(second).toBe(first);

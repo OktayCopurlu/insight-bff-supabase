@@ -15,19 +15,45 @@ process.env.BFF_AUTO_LISTEN = "false";
 // Mock Supabase client to return fast, empty data
 vi.mock("@supabase/supabase-js", () => {
   class Builder {
-    select() { return this; }
-    eq() { return this; }
-    in() { return this; }
-    order() { return this; }
-    limit() { return this; }
-    insert() { return this; }
-    update() { return this; }
-    _resolve() { return { data: [], error: null }; }
-    maybeSingle() { return Promise.resolve(this._resolve()); }
-    single() { return Promise.resolve(this._resolve()); }
-    then(onFulfilled, onRejected) { return Promise.resolve(this._resolve()).then(onFulfilled, onRejected); }
-    catch(onRejected) { return Promise.resolve(this._resolve()).catch(onRejected); }
-    finally(onFinally) { return Promise.resolve(this._resolve()).finally(onFinally); }
+    select() {
+      return this;
+    }
+    eq() {
+      return this;
+    }
+    in() {
+      return this;
+    }
+    order() {
+      return this;
+    }
+    limit() {
+      return this;
+    }
+    insert() {
+      return this;
+    }
+    update() {
+      return this;
+    }
+    _resolve() {
+      return { data: [], error: null };
+    }
+    maybeSingle() {
+      return Promise.resolve(this._resolve());
+    }
+    single() {
+      return Promise.resolve(this._resolve());
+    }
+    then(onFulfilled, onRejected) {
+      return Promise.resolve(this._resolve()).then(onFulfilled, onRejected);
+    }
+    catch(onRejected) {
+      return Promise.resolve(this._resolve()).catch(onRejected);
+    }
+    finally(onFinally) {
+      return Promise.resolve(this._resolve()).finally(onFinally);
+    }
   }
   return { createClient: () => ({ from: () => new Builder() }) };
 });

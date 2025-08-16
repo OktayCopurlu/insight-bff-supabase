@@ -222,14 +222,18 @@ describe("/feed and /translate/batch", () => {
   });
 
   it("non-strict /feed marks missing targets as pending and sets header", async () => {
-    const res = await step("When I request /feed?lang=de (non-strict)", async () =>
-      request(app).get("/feed?lang=de")
+    const res = await step(
+      "When I request /feed?lang=de (non-strict)",
+      async () => request(app).get("/feed?lang=de")
     );
-    await step("Then response is 200 and pending header includes clu_a", async () => {
-      expect(res.status).toBe(200);
-      const header = res.headers["x-pending-cluster-ids"] || "";
-      expect(header.split(",").filter(Boolean)).toContain("clu_a");
-    });
+    await step(
+      "Then response is 200 and pending header includes clu_a",
+      async () => {
+        expect(res.status).toBe(200);
+        const header = res.headers["x-pending-cluster-ids"] || "";
+        expect(header.split(",").filter(Boolean)).toContain("clu_a");
+      }
+    );
     await step("And cards have mixed statuses (pending/ready)", async () => {
       const cards = res.body;
       expect(Array.isArray(cards)).toBe(true);
@@ -240,17 +244,22 @@ describe("/feed and /translate/batch", () => {
   });
 
   it("/translate/batch dedupes ids and returns ready results", async () => {
-    const res = await step("When I POST to /translate/batch with duplicate ids", async () =>
-      request(app)
-        .post("/translate/batch?lang=de")
-        .send({ ids: ["clu_a", "clu_b", "clu_a"] })
+    const res = await step(
+      "When I POST to /translate/batch with duplicate ids",
+      async () =>
+        request(app)
+          .post("/translate/batch?lang=de")
+          .send({ ids: ["clu_a", "clu_b", "clu_a"] })
     );
-    await step("Then unique results are returned with no failures", async () => {
-      expect(res.status).toBe(200);
-      expect(Array.isArray(res.body.results)).toBe(true);
-      const ids = res.body.results.map((r) => r.id).sort();
-      expect(ids).toEqual(["clu_a", "clu_b"]);
-      expect(res.body.failed || []).toEqual([]);
-    });
+    await step(
+      "Then unique results are returned with no failures",
+      async () => {
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body.results)).toBe(true);
+        const ids = res.body.results.map((r) => r.id).sort();
+        expect(ids).toEqual(["clu_a", "clu_b"]);
+        expect(res.body.failed || []).toEqual([]);
+      }
+    );
   });
 });

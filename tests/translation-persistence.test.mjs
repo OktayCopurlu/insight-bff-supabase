@@ -232,14 +232,17 @@ describe("translation persistence and base fallback", () => {
       "When I GET /cluster/:id?lang=de-CH and pivot base is de",
       async () => request(app).get("/cluster/clu_x?lang=de-CH")
     );
-    await step("Then provider isn't called and row persists for de-CH", async () => {
-      expect(res.status).toBe(200);
-      expect(res.body.language).toBe("de-CH");
-      expect(tfcSpy).not.toHaveBeenCalled();
-      const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
-      expect(ins.length).toBeGreaterThanOrEqual(1);
-      expect(ins[0].values.lang).toBe("de-CH");
-    });
+    await step(
+      "Then provider isn't called and row persists for de-CH",
+      async () => {
+        expect(res.status).toBe(200);
+        expect(res.body.language).toBe("de-CH");
+        expect(tfcSpy).not.toHaveBeenCalled();
+        const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
+        expect(ins.length).toBeGreaterThanOrEqual(1);
+        expect(ins[0].values.lang).toBe("de-CH");
+      }
+    );
   });
 
   it("POST /translate/batch persists results for all ids", async () => {
@@ -256,16 +259,26 @@ describe("translation persistence and base fallback", () => {
       created_at: new Date().toISOString(),
       model: "seed",
     });
-    const res = await step("When I POST /translate/batch for two clusters", async () =>
-      request(app).post("/translate/batch?lang=tr").send({ ids: ["clu_x", "clu_y"] })
+    const res = await step(
+      "When I POST /translate/batch for two clusters",
+      async () =>
+        request(app)
+          .post("/translate/batch?lang=tr")
+          .send({ ids: ["clu_x", "clu_y"] })
     );
-    await step("Then results include both ids and at least two inserts happen", async () => {
-      expect(res.status).toBe(200);
-      expect(Array.isArray(res.body.results)).toBe(true);
-      expect(res.body.results.map((r) => r.id).sort()).toEqual(["clu_x", "clu_y"]);
-      const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
-      expect(ins.length).toBeGreaterThanOrEqual(2);
-    });
+    await step(
+      "Then results include both ids and at least two inserts happen",
+      async () => {
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body.results)).toBe(true);
+        expect(res.body.results.map((r) => r.id).sort()).toEqual([
+          "clu_x",
+          "clu_y",
+        ]);
+        const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
+        expect(ins.length).toBeGreaterThanOrEqual(2);
+      }
+    );
     // cleanup: remove y
     datasets.clusters.pop();
     datasets.cluster_ai_currents = datasets.cluster_ai_currents.filter(

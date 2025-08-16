@@ -224,8 +224,9 @@ import { app } from "../server.mjs";
 
 describe("/feed strict mode and /config", () => {
   it("/feed?strict=1 returns ready cards translated to target", async () => {
-    const res = await step("When I request /feed in strict mode in fr", async () =>
-      request(app).get("/feed?lang=fr&strict=1&limit=5")
+    const res = await step(
+      "When I request /feed in strict mode in fr",
+      async () => request(app).get("/feed?lang=fr&strict=1&limit=5")
     );
     await step("Then it returns ready cards in fr language", async () => {
       expect(res.status).toBe(200);

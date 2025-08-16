@@ -273,21 +273,25 @@ describe("GET /cluster/:id", () => {
   });
 
   it("serves cluster with translated text when ?lang=tr-TR", async () => {
-    const res = await step("When I request /cluster/clu_1?lang=tr-TR", async () =>
-      request(app).get("/cluster/clu_1?lang=tr-TR")
+    const res = await step(
+      "When I request /cluster/clu_1?lang=tr-TR",
+      async () => request(app).get("/cluster/clu_1?lang=tr-TR")
     );
-    await step("Then response is translated and has timeline/citations", async () => {
-      expect(res.status).toBe(200);
-      expect(res.body).toHaveProperty("id", "clu_1");
-      expect(res.body.language).toBe("tr-TR");
-      expect(typeof res.body.title).toBe("string");
-      expect(Array.isArray(res.body.timeline)).toBe(true);
-      expect(Array.isArray(res.body.citations)).toBe(true);
-      const hasTR = [res.body.title, res.body.summary, res.body.ai_details]
-        .filter(Boolean)
-        .some((t) => String(t).includes("TR:"));
-      expect(hasTR).toBe(true);
-    });
+    await step(
+      "Then response is translated and has timeline/citations",
+      async () => {
+        expect(res.status).toBe(200);
+        expect(res.body).toHaveProperty("id", "clu_1");
+        expect(res.body.language).toBe("tr-TR");
+        expect(typeof res.body.title).toBe("string");
+        expect(Array.isArray(res.body.timeline)).toBe(true);
+        expect(Array.isArray(res.body.citations)).toBe(true);
+        const hasTR = [res.body.title, res.body.summary, res.body.ai_details]
+          .filter(Boolean)
+          .some((t) => String(t).includes("TR:"));
+        expect(hasTR).toBe(true);
+      }
+    );
   });
 
   it("returns translated pivot ai_details when it's already rich (no composition)", async () => {
@@ -295,13 +299,16 @@ describe("GET /cluster/:id", () => {
       "When I request /cluster/clu_2?lang=tr-TR (rich pivot details)",
       async () => request(app).get("/cluster/clu_2?lang=tr-TR")
     );
-    await step("Then ai_details is translated directly without composition", async () => {
-      expect(res.status).toBe(200);
-      expect(res.body.language).toBe("tr-TR");
-      expect(typeof res.body.ai_details).toBe("string");
-      expect(res.body.ai_details.startsWith("TR:")).toBe(true);
-      expect(res.body.ai_details.includes("Timeline updates:")).toBe(false);
-      expect(res.body.ai_details.includes("Sources:")).toBe(false);
-    });
+    await step(
+      "Then ai_details is translated directly without composition",
+      async () => {
+        expect(res.status).toBe(200);
+        expect(res.body.language).toBe("tr-TR");
+        expect(typeof res.body.ai_details).toBe("string");
+        expect(res.body.ai_details.startsWith("TR:")).toBe(true);
+        expect(res.body.ai_details.includes("Timeline updates:")).toBe(false);
+        expect(res.body.ai_details.includes("Sources:")).toBe(false);
+      }
+    );
   });
 });
