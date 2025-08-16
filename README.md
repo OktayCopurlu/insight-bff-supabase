@@ -118,3 +118,25 @@ See `scripts/integration-test.http` for ready-made calls (VS Code REST Client).
 ## License
 
 Internal project module – licensing inherits root project.
+
+---
+
+## Observability and Ops
+
+- GET /metrics — returns lightweight in-process counters for the BFF and translation layer (providerCalls, cacheHits/Misses, dbHits/Writes, latencyMs {last, avg, total}). Counters reset on process restart; suitable for smoke checks and CI.
+- Console logs with prefix "metric:" are emitted for quick grepping:
+  - metric: bff.batch.limited — IP-based token bucket limited a /translate/batch request
+  - metric: bff.batch.failed|succeeded — batch outcomes with counts
+  - metric: provider.call — translation provider call with latency_ms
+  - metric: provider.cache_hit — in-memory cache served a translation
+  - metric: provider.db_hit — DB cache served a translation
+  - metric: provider.db_write — translation persisted to DB cache
+
+### Cost controls
+
+- /translate/batch has an IP-based token bucket. Tune with RATE_LIMIT_BATCH (tokens/interval) and RATE_LIMIT_INTERVAL_MS. Empty ids arrays are no-ops and logged.
+- Translation timeouts and retries can be tuned via MT_TIMEOUT_MS, MT_RETRIES, MT_BACKOFF_MS. Long texts are chunked using MT_CHUNK_THRESHOLD and MT_CHUNK_MAX to reduce timeouts.
+
+### Warm-up backfill
+
+- scripts/backfill-warm-clusters.js performs a small backfill by fetching recent items via /feed and warming translations via /translate/batch in chunks. It respects 429s by pausing briefly.

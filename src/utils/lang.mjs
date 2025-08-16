@@ -31,6 +31,11 @@ export function dirFor(lang) {
   return isRtlLang(lang) ? "rtl" : "ltr";
 }
 
+export function baseLang(lang) {
+  const n = normalizeBcp47(lang) || "en";
+  return n.split("-")[0];
+}
+
 // Framework-agnostic negotiation: takes queryLang and acceptLanguage header value
 export function negotiateLanguageSimple(queryLang, acceptLanguageHeader) {
   const q = normalizeBcp47(queryLang);

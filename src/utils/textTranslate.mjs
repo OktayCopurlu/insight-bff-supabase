@@ -20,6 +20,25 @@ try {
 const MAX_CACHE = parseInt(process.env.TRANSLATION_CACHE_MAX || "500");
 const cache = new Map(); // key -> text
 
+// Lightweight in-process metrics for observability
+export const translateMetrics = {
+  providerCalls: 0,
+  providerErrors: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  dbHits: 0,
+  dbWrites: 0,
+  latencyMs: { last: 0, avg: 0, total: 0, count: 0 },
+};
+function _recordLatency(ms) {
+  translateMetrics.latencyMs.last = ms;
+  translateMetrics.latencyMs.total += ms;
+  translateMetrics.latencyMs.count += 1;
+  translateMetrics.latencyMs.avg = Math.round(
+    translateMetrics.latencyMs.total / translateMetrics.latencyMs.count
+  );
+}
+
 // Timeouts and retry knobs
 // Slightly higher defaults to reduce spurious timeouts under load
 const MT_TIMEOUT_MS = parseInt(process.env.MT_TIMEOUT_MS || "3000");
@@ -159,17 +178,26 @@ async function attemptTranslateWithRetries(text, srcLang, dstLang) {
   // Single-provider retry loop (Gemini)
   for (let i = 0; i <= MT_RETRIES; i++) {
     try {
+      const t0 = Date.now();
+      translateMetrics.providerCalls += 1;
       const out = await withTimeout(
         translateViaProvider(text, srcLang, dstLang),
         MT_TIMEOUT_MS,
         "translate provider (gemini)"
       );
+      _recordLatency(Date.now() - t0);
+      try {
+        console.info("metric: provider.call", {
+          latency_ms: translateMetrics.latencyMs.last,
+        });
+      } catch (_) {}
       return out;
     } catch (e) {
       lastErr = e;
       if (i < MT_RETRIES) await sleep(MT_BACKOFF_MS * (i + 1));
     }
   }
+  translateMetrics.providerErrors += 1;
   const marker =
     process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
 
@@ -183,7 +211,13 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
   const cacheDst = baseLang(dstLang) || dstLang;
   const key = keyFor(text, srcLang, cacheDst);
   // memory
-  if (cache.has(key)) return cache.get(key);
+  if (cache.has(key)) {
+    translateMetrics.cacheHits += 1;
+    try {
+      console.debug("metric: provider.cache_hit", { key });
+    } catch (_) {}
+    return cache.get(key);
+  }
   // db
   if (supabase) {
     try {
@@ -197,11 +231,16 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
         "translations select"
       );
       if (data?.text) {
+        translateMetrics.dbHits += 1;
         lruSet(key, data.text);
+        try {
+          console.debug("metric: provider.db_hit", { key });
+        } catch (_) {}
         return data.text;
       }
     } catch (_) {}
   }
+  translateMetrics.cacheMisses += 1;
   // Chunk if long to reduce provider timeouts
   let out;
   if (text.length >= MT_CHUNK_THRESHOLD) {
@@ -210,6 +249,10 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
     for (const part of parts) {
       const partKey = keyFor(part, srcLang, cacheDst);
       if (cache.has(partKey)) {
+        translateMetrics.cacheHits += 1;
+        try {
+          console.debug("metric: provider.cache_hit", { key: partKey });
+        } catch (_) {}
         translatedParts.push(cache.get(partKey));
         continue;
       }
@@ -232,6 +275,10 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
             800,
             "translations insert (chunk)"
           );
+          translateMetrics.dbWrites += 1;
+          try {
+            console.debug("metric: provider.db_write", { key: partKey });
+          } catch (_) {}
         } catch (_) {}
       }
       translatedParts.push(translated);
@@ -251,6 +298,10 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
         800,
         "translations insert"
       );
+      translateMetrics.dbWrites += 1;
+      try {
+        console.debug("metric: provider.db_write", { key });
+      } catch (_) {}
     } catch (_) {}
   }
   return out;
@@ -279,6 +330,11 @@ export async function translateFieldsCached(
     (summary ? !!hitSummary : true) &&
     (details ? !!hitDetails : true);
   if (allHit) {
+    let hits = 0;
+    if (title && hitTitle) hits++;
+    if (summary && hitSummary) hits++;
+    if (details && hitDetails) hits++;
+    translateMetrics.cacheHits += hits;
     return {
       title: hitTitle || title,
       summary: hitSummary || summary,
@@ -315,16 +371,24 @@ export async function translateFieldsCached(
   ].join("\n");
   let raw = "";
   try {
+    const t0 = Date.now();
+    translateMetrics.providerCalls += 1;
     const res = await withTimeout(
       model.generateContent(prompt),
       MT_TIMEOUT_MS,
       "translate fields (gemini)"
     );
+    _recordLatency(Date.now() - t0);
     const text =
       res?.response?.text?.() ||
       res?.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
       "";
     raw = String(text || "").trim();
+    try {
+      console.info("metric: provider.call", {
+        latency_ms: translateMetrics.latencyMs.last,
+      });
+    } catch (_) {}
   } catch (_) {
     // Fallback to per-string path on provider failure
     return {
@@ -374,17 +438,18 @@ export async function translateFieldsCached(
     if (supabase) {
       try {
         await withTimeout(
-          supabase
-            .from("translations")
-            .insert({
-              key: k,
-              src_lang: srcLang,
-              dst_lang: cacheDst,
-              text: translated,
-            }),
+          supabase.from("translations").insert({
+            key: k,
+            src_lang: srcLang,
+            dst_lang: cacheDst,
+            text: translated,
+          }),
           800,
           "translations insert (fields)"
         );
+        try {
+          console.debug("metric: provider.db_write", { key: k });
+        } catch (_) {}
       } catch (_) {}
     }
   }

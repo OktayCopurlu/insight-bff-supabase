@@ -12,6 +12,7 @@ import {
 import {
   translateTextCached,
   translateFieldsCached,
+  translateMetrics,
 } from "./src/utils/textTranslate.mjs";
 
 // Load .env manually (simple parser) if not already loaded
@@ -131,6 +132,33 @@ const chats = new Map();
 const tokens = new Map();
 const users = [];
 const interactions = [];
+
+// --------------- Lightweight BFF metrics ---------------
+const bffMetrics = {
+  service: "insight-bff",
+  feed: { requests: 0, errors: 0 },
+  cluster: { requests: 0, errors: 0 },
+  config: { requests: 0, errors: 0 },
+  batch: {
+    requests: 0,
+    succeeded: 0,
+    failed: 0,
+    limited: 0,
+  },
+};
+
+app.get("/metrics", (_req, res) => {
+  res.json({ ...bffMetrics, translate: translateMetrics });
+});
+
+// Lightweight health check for smoke tests and uptime probes
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "insight-bff",
+    time: new Date().toISOString(),
+  });
+});
 
 // Simple auth middleware using in-memory token store
 function authMiddleware(req, res, next) {
@@ -875,6 +903,8 @@ async function _drainPersistQueue() {
 
 // Helper: get or translate cluster AI into target language and persist idempotently
 async function ensureClusterTextInLang(clusterId, targetLang) {
+  const base = (t) => (t || "").split("-")[0].toLowerCase();
+  const baseTarget = base(targetLang);
   // 1) Try target language first (include created_at for staleness check)
   const { data: existingTarget, error: targetErr } = await supabase
     .from("cluster_ai")
@@ -886,6 +916,22 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
     .eq("is_current", true)
     .maybeSingle();
   if (targetErr) throw targetErr;
+  // Fallback to base language row if exact regional row is missing
+  let existingBase = null;
+  if (!existingTarget && baseTarget && baseTarget !== targetLang) {
+    try {
+      const { data: eb } = await supabase
+        .from("cluster_ai")
+        .select(
+          "id,lang,ai_title,ai_summary,ai_details,is_current,created_at,model"
+        )
+        .eq("cluster_id", clusterId)
+        .eq("lang", baseTarget)
+        .eq("is_current", true)
+        .maybeSingle();
+      existingBase = eb || null;
+    } catch (_) {}
+  }
 
   // 2) Find a pivot/current row (any lang, prefer en) and include created_at
   const { data: currents, error: curErr } = await supabase
@@ -909,31 +955,32 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
     .slice(0, 10);
 
   // If target exists, check staleness vs pivot (created_at)
-  if (existingTarget) {
+  const useRow = existingTarget || existingBase || null;
+  if (useRow) {
     try {
-      const tCreated = Date.parse(existingTarget.created_at || 0) || 0;
+      const tCreated = Date.parse(useRow.created_at || 0) || 0;
       const pCreated = Date.parse(pivot.created_at || 0) || 0;
       // Also detect legacy rows where the title wasn't translated (title equals pivot title but languages differ)
       const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
       const needsRefreshTitle =
-        norm(existingTarget.ai_title) === norm(pivot.ai_title) &&
-        (existingTarget.lang || "") !== (pivot.lang || "");
+        norm(useRow.ai_title) === norm(pivot.ai_title) &&
+        (useRow.lang || "") !== (pivot.lang || "");
       const needsRefreshSummary =
-        norm(existingTarget.ai_summary) === norm(pivot.ai_summary) &&
-        (existingTarget.lang || "") !== (pivot.lang || "");
+        norm(useRow.ai_summary) === norm(pivot.ai_summary) &&
+        (useRow.lang || "") !== (pivot.lang || "");
       const needsRefreshDetails =
-        norm(existingTarget.ai_details) === norm(pivot.ai_details) &&
-        (existingTarget.lang || "") !== (pivot.lang || "");
+        norm(useRow.ai_details) === norm(pivot.ai_details) &&
+        (useRow.lang || "") !== (pivot.lang || "");
       // Detect stub marker from earlier fallback translations
       const stubMarker = " [translated]";
       const hasStubMarker =
-        (existingTarget.ai_title || "").includes(stubMarker) ||
-        (existingTarget.ai_summary || "").includes(stubMarker) ||
-        (existingTarget.ai_details || "").includes(stubMarker);
+        (useRow.ai_title || "").includes(stubMarker) ||
+        (useRow.ai_summary || "").includes(stubMarker) ||
+        (useRow.ai_details || "").includes(stubMarker);
       // If existing model encodes the same pivot signature, prefer it as fresh
-      const modelTag = (existingTarget.model || "").toString();
+      const modelTag = (useRow.model || "").toString();
       const samePivotSig =
-        (existingTarget.pivot_hash && existingTarget.pivot_hash === pivotSig) ||
+        (useRow.pivot_hash && useRow.pivot_hash === pivotSig) ||
         modelTag.includes(`#ph=${pivotSig}`);
       if (
         (samePivotSig || tCreated >= pCreated) &&
@@ -944,7 +991,7 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
       ) {
         // Fresh enough
         return {
-          ...existingTarget,
+          ...useRow,
           is_translated: false,
           translated_from: null,
         };
@@ -955,7 +1002,7 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
       await supabase
         .from("cluster_ai")
         .update({ is_current: false })
-        .eq("id", existingTarget.id);
+        .eq("id", useRow.id);
       try {
         await supabase.from("cluster_ai").insert({
           cluster_id: clusterId,
@@ -986,7 +1033,7 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
       };
     } catch (e) {
       console.warn("Refresh translated cluster_ai failed:", e.message);
-      return { ...existingTarget, is_translated: false, translated_from: null };
+      return { ...useRow, is_translated: false, translated_from: null };
     }
   }
 
@@ -1159,6 +1206,7 @@ async function getClusterTextInLangNonBlocking(clusterId, targetLang) {
 
 // GET /feed?lang=de-CH&limit=...
 app.get("/feed", langMiddleware, async (req, res) => {
+  bffMetrics.feed.requests += 1;
   const target = req.lang;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const strict = String(req.query.strict || "").toLowerCase();
@@ -1171,7 +1219,7 @@ app.get("/feed", langMiddleware, async (req, res) => {
   const effectiveLimit = waitTranslations ? Math.min(limit, 8) : limit;
   // Overall time budget for strict mode (keep under FE wait window)
   const STRICT_BUDGET_MS = parseInt(
-    process.env.FEED_STRICT_BUDGET_MS || "18000"
+    process.env.FEED_STRICT_BUDGET_MS || "12000"
   );
   const overallDeadline = waitTranslations ? Date.now() + STRICT_BUDGET_MS : 0;
   try {
@@ -1361,7 +1409,8 @@ app.get("/feed", langMiddleware, async (req, res) => {
       for (const c of picked) {
         let ensured = null;
         try {
-          const { data } = await withTimeout(
+          let data = null;
+          let resp = await withTimeout(
             supabase
               .from("cluster_ai")
               .select(
@@ -1374,6 +1423,28 @@ app.get("/feed", langMiddleware, async (req, res) => {
             DB_T_FAST_MS,
             "cluster_ai target (feed)"
           );
+          data = resp?.data || null;
+          if (!data) {
+            // Fallback to base language row
+            const base = (t) => (t || "").split("-")[0].toLowerCase();
+            const baseTarget = base(target);
+            if (baseTarget && baseTarget !== target) {
+              resp = await withTimeout(
+                supabase
+                  .from("cluster_ai")
+                  .select(
+                    "id,lang,ai_title,ai_summary,ai_details,is_current,created_at"
+                  )
+                  .eq("cluster_id", c.id)
+                  .eq("lang", baseTarget)
+                  .eq("is_current", true)
+                  .maybeSingle(),
+                DB_T_FAST_MS,
+                "cluster_ai base (feed)"
+              );
+              data = resp?.data || null;
+            }
+          }
           ensured = data || null;
         } catch (_) {}
         const repThumb = thumbByArticle.get(c.rep_article) || null;
@@ -1423,6 +1494,7 @@ app.get("/feed", langMiddleware, async (req, res) => {
     res.json(cards);
   } catch (err) {
     console.error("/feed failed", err.message);
+    bffMetrics.feed.errors += 1;
     res.status(500).json({ error: "Failed to load feed" });
   }
 });
@@ -1467,6 +1539,7 @@ async function getClusterCitations(clusterId, n = 3) {
 }
 
 app.get("/cluster/:id", langMiddleware, async (req, res) => {
+  bffMetrics.cluster.requests += 1;
   const target = req.lang;
   const { id } = req.params;
   try {
@@ -1612,6 +1685,7 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
     );
   } catch (err) {
     console.error("/cluster/:id failed", err.message);
+    bffMetrics.cluster.errors += 1;
     res.status(500).json({ error: "Failed to load cluster" });
   }
 });
@@ -1622,6 +1696,7 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
 
 // GET /config?market=CH
 app.get("/config", async (req, res) => {
+  bffMetrics.config.requests += 1;
   // Build a safe fallback config when DB isn't ready or table is missing
   const buildFallback = (requested) => {
     const fallbackMarket =
@@ -1721,6 +1796,7 @@ app.get("/config", async (req, res) => {
     return res.json({ markets: rows });
   } catch (e) {
     console.error("/config failed", e.message);
+    bffMetrics.config.errors += 1;
     // Last-resort fallback to avoid breaking FE
     const market = String(req.query.market || "").trim();
     if (market) return res.json(buildFallback(market));
@@ -1730,7 +1806,45 @@ app.get("/config", async (req, res) => {
 
 // POST /translate/batch?lang=X
 // Body: { ids: [cluster_id...] }
+// Simple IP token bucket limiter for batch endpoint (dynamic env read)
+function _rateLimitBatchLimit() {
+  const v = parseInt(process.env.RATE_LIMIT_BATCH || "60");
+  return Number.isFinite(v) && v >= 0 ? v : 60;
+}
+const _ipBuckets = new Map();
+function _takeToken(ip) {
+  const now = Date.now();
+  const hourMs = 60 * 60 * 1000;
+  const rec = _ipBuckets.get(ip) || {
+    windowStart: now,
+    tokens: _rateLimitBatchLimit(),
+  };
+  if (now - rec.windowStart >= hourMs) {
+    rec.windowStart = now;
+    rec.tokens = _rateLimitBatchLimit();
+  }
+  if (rec.tokens <= 0) {
+    _ipBuckets.set(ip, rec);
+    return false;
+  }
+  rec.tokens -= 1;
+  _ipBuckets.set(ip, rec);
+  return true;
+}
+
 app.post("/translate/batch", langMiddleware, async (req, res) => {
+  bffMetrics.batch.requests += 1;
+  const ip =
+    req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+    req.socket.remoteAddress ||
+    "unknown";
+  if (!_takeToken(ip)) {
+    bffMetrics.batch.limited += 1;
+    try {
+      console.warn("metric: bff.batch.limited", { ip });
+    } catch (_) {}
+    return res.status(429).json({ error: "rate_limited" });
+  }
   const target = req.lang;
   try {
     // Accept either { ids: [...] } or { clusterIds: [...] }
@@ -1739,9 +1853,14 @@ app.post("/translate/batch", langMiddleware, async (req, res) => {
       ? req.body.clusterIds
       : [];
     const ids = (bodyIds.length ? bodyIds : bodyClusterIds).filter(Boolean);
-    if (!ids.length) return res.json({ results: [], failed: [] });
+    if (!ids.length) {
+      try {
+        console.info("metric: bff.batch.requests", { count: 0 });
+      } catch (_) {}
+      return res.json({ results: [], failed: [] });
+    }
     const uniqueIds = [...new Set(ids)].slice(0, 20);
-    const perItemMs = parseInt(process.env.BATCH_TRANSLATE_ITEM_MS || "2000");
+    const perItemMs = parseInt(process.env.BATCH_TRANSLATE_ITEM_MS || "6000");
     const conc = parseInt(process.env.BATCH_TRANSLATE_CONCURRENCY || "6");
 
     const queue = [...uniqueIds];
@@ -1781,9 +1900,23 @@ app.post("/translate/batch", langMiddleware, async (req, res) => {
         })()
     );
     await Promise.all(workers);
+    if (failed.length) {
+      bffMetrics.batch.failed += failed.length;
+      try {
+        console.warn("metric: bff.batch.failed", { count: failed.length });
+      } catch (_) {}
+    }
+    bffMetrics.batch.succeeded += results.length;
+    try {
+      console.info("metric: bff.batch.succeeded", { count: results.length });
+    } catch (_) {}
     res.json({ results, failed });
   } catch (e) {
     console.error("/translate/batch failed", e.message);
+    bffMetrics.batch.failed += 1;
+    try {
+      console.warn("metric: bff.batch.failed", { count: 1 });
+    } catch (_) {}
     res.status(500).json({ error: "Failed to translate batch" });
   }
 });
