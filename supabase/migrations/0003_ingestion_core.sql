@@ -19,17 +19,7 @@ create table if not exists articles (
   fetched_at timestamptz default now()
 );
 
-create table if not exists article_ai (
-  id uuid primary key default gen_random_uuid(),
-  article_id uuid not null references articles(id) on delete cascade,
-  ai_title text,
-  ai_summary text,
-  ai_details text,
-  ai_language text,
-  model text,
-  is_current boolean default true,
-  created_at timestamptz default now()
-);
+-- legacy per-article AI table removed (cluster-first)
 
 create table if not exists categories (
   id serial primary key,
@@ -76,7 +66,6 @@ begin
     insert into media_assets(id,url) values (gen_random_uuid(),'https://placehold.co/600x400');
     select id into med from media_assets limit 1;
     insert into article_media(article_id,media_id,role) values (art,med,'thumbnail');
-    insert into article_ai(article_id,ai_title,ai_summary,ai_details,ai_language,model,is_current)
-      values(art,'Demo AI Title','AI summary of demo article','Detailed AI explanation','en','test-model',true);
+  -- no per-article AI seed
   end if;
 end $$;

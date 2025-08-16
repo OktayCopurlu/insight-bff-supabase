@@ -31,13 +31,14 @@ const supabase = createClient(url, service, {
 });
 
 let articleId = null;
+let clusterId = null;
 let marker = null;
 
 describe("remote connectivity", () => {
-  it("selects at least one article id (or handles empty)", async () => {
+  it("selects at least one article id (and cluster_id) or handles empty", async () => {
     const { data, error } = await supabase
       .from("articles")
-      .select("id")
+      .select("id,cluster_id")
       .limit(1);
     if (error) throw error;
     if (!data || data.length === 0) {
@@ -45,31 +46,51 @@ describe("remote connectivity", () => {
       return; // treat empty as pass for connectivity
     }
     articleId = data[0].id;
+    clusterId = data[0].cluster_id || null;
     expect(typeof articleId).toBe("string");
   });
 
-  it("inserts and reads back ai explanation marker", async () => {
+  it("inserts and reads back cluster_ai marker (or skips if no cluster)", async () => {
     if (!articleId) return; // skipped gracefully
+    // Prefer using the article's cluster when available; otherwise try any cluster
+    if (!clusterId) {
+      const { data: anyCluster } = await supabase
+        .from("clusters")
+        .select("id")
+        .limit(1);
+      clusterId = anyCluster && anyCluster[0] ? anyCluster[0].id : null;
+    }
+    if (!clusterId) {
+      console.warn("No clusters present yet. Skipping cluster_ai write test.");
+      return; // treat empty as pass for connectivity
+    }
+
+    // Use a test-only language tag to avoid interfering with real data
+    const testLang = "x-test";
+    // Mark previous test rows as not current
     await supabase
-      .from("article_ai")
+      .from("cluster_ai")
       .update({ is_current: false })
-      .eq("article_id", articleId)
+      .eq("cluster_id", clusterId)
+      .eq("lang", testLang)
       .eq("is_current", true);
+
     marker = "vitest-connectivity-" + new Date().toISOString();
-    const { error: insErr } = await supabase.from("article_ai").insert({
-      article_id: articleId,
+    const { error: insErr } = await supabase.from("cluster_ai").insert({
+      cluster_id: clusterId,
+      lang: testLang,
       ai_title: "Connectivity",
       ai_summary: "summary",
       ai_details: marker,
-      ai_language: "en",
       model: "test",
       is_current: true,
     });
     if (insErr) throw insErr;
     const { data: back, error: backErr } = await supabase
-      .from("article_ai")
+      .from("cluster_ai")
       .select("ai_details")
-      .eq("article_id", articleId)
+      .eq("cluster_id", clusterId)
+      .eq("lang", testLang)
       .eq("is_current", true)
       .limit(1);
     if (backErr) throw backErr;

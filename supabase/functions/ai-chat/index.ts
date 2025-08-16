@@ -40,15 +40,10 @@ Deno.serve(async (req) => {
           status: 404,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
-      const { data: ai } = await supabaseClient
-        .from("article_ai")
-        .select("ai_title,ai_summary,ai_details")
-        .eq("article_id", articleId)
-        .eq("is_current", true)
-        .maybeSingle();
-      const title = ai?.ai_title || base.title;
-      const summary = ai?.ai_summary || base.snippet || "";
-      const explanation = ai?.ai_details || "";
+      // Legacy per-article AI table deprecated; use base article fields only
+      const title = base.title;
+      const summary = base.snippet || "";
+      const explanation = "";
       const analytic = { bias_score: 0, sentiment_label: "neutral" }; // placeholder
 
       const context =

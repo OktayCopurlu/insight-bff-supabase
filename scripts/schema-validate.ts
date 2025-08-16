@@ -14,15 +14,7 @@ const requiredTables: Record<string, string[]> = {
     "canonical_url",
     "url",
   ],
-  article_ai: [
-    "id",
-    "article_id",
-    "ai_title",
-    "ai_summary",
-    "ai_details",
-    "ai_language",
-    "is_current",
-  ],
+  // cluster-first: legacy per-article AI table deprecated
   sources: ["id", "name", "homepage"],
   categories: ["id", "path"],
   article_categories: ["article_id", "category_id"],

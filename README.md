@@ -6,14 +6,14 @@ Backend-for-Frontend layer extracted from the original `Insight-frontend/supabas
 
 Provides a thin API surface (Edge Functions) for the frontend (news app) to:
 
-1. Fetch articles (aggregated + AI enriched)
+1. Fetch clusters and articles (cluster-first, AI enriched via cluster_ai)
 2. Generate / retrieve AI explanations, coverage comparisons (ephemeral), quizzes (placeholder)
 3. Chat about an article context (AI chat)
 4. Manage auth (limited) / future preferences
 
 ## Current State (Post-Extraction)
 
-Functions now query the normalized ingestion schema directly (`articles`, `article_ai`, `sources`, `article_categories`, `media_assets`, etc.) and assemble responses in code. No extra SQL views or new tables were added for core article flows.
+Functions now query the normalized ingestion schema directly (`articles`, `sources`, `article_categories`, `media_assets`, `clusters`, `cluster_ai`, etc.) and assemble responses in code. No extra SQL views or new tables were added for core article flows.
 
 ## Migration Strategy Overview
 
