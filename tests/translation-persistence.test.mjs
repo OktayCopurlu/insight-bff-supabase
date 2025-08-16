@@ -78,21 +78,31 @@ vi.mock("@supabase/supabase-js", () => {
       return this;
     }
     update(obj) {
-      calls.updates.push({ table: this.table, values: obj, where: this._filters });
+      calls.updates.push({
+        table: this.table,
+        values: obj,
+        where: this._filters,
+      });
       return this;
     }
     _resolve() {
       if (this.table === "clusters") {
         if (this._filters.id) {
-          const row = datasets.clusters.find((c) => c.id === this._filters.id) || null;
+          const row =
+            datasets.clusters.find((c) => c.id === this._filters.id) || null;
           return { data: row, error: null };
         }
-        return { data: datasets.clusters.slice(0, this._limit || undefined), error: null };
+        return {
+          data: datasets.clusters.slice(0, this._limit || undefined),
+          error: null,
+        };
       }
       if (this.table === "articles") {
         if (this._filters.cluster_id && this._in) {
           const ids = this._in.arr || [];
-          const list = datasets.coverage_articles.filter((a) => ids.includes(a.cluster_id));
+          const list = datasets.coverage_articles.filter((a) =>
+            ids.includes(a.cluster_id)
+          );
           return { data: list, error: null };
         }
         if (this._in && this._in.k === "id") {
@@ -175,17 +185,21 @@ describe("translation persistence and base fallback", () => {
     tfcSpy.mockClear();
     // reset datasets to initial
     datasets.cluster_ai_targets.length = 0;
-    datasets.cluster_ai_currents.splice(0, datasets.cluster_ai_currents.length, {
-      id: "ai_en_x",
-      cluster_id: "clu_x",
-      lang: "en",
-      ai_title: "Pivot X Title",
-      ai_summary: "Pivot X Summary",
-      ai_details: "Pivot X Details",
-      is_current: true,
-      created_at: new Date().toISOString(),
-      model: "seed",
-    });
+    datasets.cluster_ai_currents.splice(
+      0,
+      datasets.cluster_ai_currents.length,
+      {
+        id: "ai_en_x",
+        cluster_id: "clu_x",
+        lang: "en",
+        ai_title: "Pivot X Title",
+        ai_summary: "Pivot X Summary",
+        ai_details: "Pivot X Details",
+        is_current: true,
+        created_at: new Date().toISOString(),
+        model: "seed",
+      }
+    );
   });
 
   it("GET /cluster/:id?lang=tr writes a target row when missing (write-through)", async () => {
@@ -193,8 +207,8 @@ describe("translation persistence and base fallback", () => {
     expect(res.status).toBe(200);
     // Response should be in requested language and contain translated fields
     expect(res.body.language).toBe("tr");
-    expect(res.body.title.startsWith("TR:")) .toBe(true);
-    expect(res.body.summary.startsWith("TR:")) .toBe(true);
+    expect(res.body.title.startsWith("TR:")).toBe(true);
+    expect(res.body.summary.startsWith("TR:")).toBe(true);
     // One insert into cluster_ai with target lang
     const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
     expect(ins.length).toBeGreaterThanOrEqual(1);
@@ -241,12 +255,17 @@ describe("translation persistence and base fallback", () => {
       .send({ ids: ["clu_x", "clu_y"] });
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.results)).toBe(true);
-    expect(res.body.results.map((r) => r.id).sort()).toEqual(["clu_x", "clu_y"]);
+    expect(res.body.results.map((r) => r.id).sort()).toEqual([
+      "clu_x",
+      "clu_y",
+    ]);
     const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
     // One per cluster (or more if refresh flow happens); at least 2
     expect(ins.length).toBeGreaterThanOrEqual(2);
     // cleanup: remove y
     datasets.clusters.pop();
-    datasets.cluster_ai_currents = datasets.cluster_ai_currents.filter((r) => r.cluster_id !== "clu_y");
+    datasets.cluster_ai_currents = datasets.cluster_ai_currents.filter(
+      (r) => r.cluster_id !== "clu_y"
+    );
   });
 });

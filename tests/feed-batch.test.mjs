@@ -197,17 +197,19 @@ vi.mock("../src/utils/textTranslate.mjs", () => ({
     if (base(dstLang) === "de") return `DE:${text}`;
     return text;
   }),
-  translateFieldsCached: vi.fn(async ({ title, summary, details }, { dstLang }) => {
-    const base = (s) => (s || "").split("-")[0];
-    if (base(dstLang) === "de") {
-      return {
-        title: `DE:${title}`,
-        summary: `DE:${summary}`,
-        details: `DE:${details}`,
-      };
+  translateFieldsCached: vi.fn(
+    async ({ title, summary, details }, { dstLang }) => {
+      const base = (s) => (s || "").split("-")[0];
+      if (base(dstLang) === "de") {
+        return {
+          title: `DE:${title}`,
+          summary: `DE:${summary}`,
+          details: `DE:${details}`,
+        };
+      }
+      return { title, summary, details };
     }
-    return { title, summary, details };
-  }),
+  ),
 }));
 
 // Now import the app
