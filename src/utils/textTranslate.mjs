@@ -255,3 +255,131 @@ export async function translateTextCached(text, { srcLang = "auto", dstLang }) {
   }
   return out;
 }
+
+// NEW: single-call JSON translation for {title, summary, details}
+export async function translateFieldsCached(
+  fields,
+  { srcLang = "auto", dstLang }
+) {
+  const { title = "", summary = "", details = "" } = fields || {};
+  // Short-circuit when nothing to translate
+  if (!title && !summary && !details) return { title, summary, details };
+  const cacheDst = baseLang(dstLang) || dstLang;
+  // Quick per-field cache hits
+  const kTitle = title ? keyFor(title, srcLang, cacheDst) : null;
+  const kSummary = summary ? keyFor(summary, srcLang, cacheDst) : null;
+  const kDetails = details ? keyFor(details, srcLang, cacheDst) : null;
+  const hitTitle = kTitle && cache.has(kTitle) ? cache.get(kTitle) : null;
+  const hitSummary = kSummary && cache.has(kSummary) ? cache.get(kSummary) : null;
+  const hitDetails = kDetails && cache.has(kDetails) ? cache.get(kDetails) : null;
+  const allHit =
+    (title ? !!hitTitle : true) &&
+    (summary ? !!hitSummary : true) &&
+    (details ? !!hitDetails : true);
+  if (allHit) {
+    return {
+      title: hitTitle || title,
+      summary: hitSummary || summary,
+      details: hitDetails || details,
+    };
+  }
+  // No provider? Fallback to per-string path
+  if (!genAI) {
+    return {
+      title: title
+        ? await translateTextCached(title, { srcLang, dstLang })
+        : "",
+      summary: summary
+        ? await translateTextCached(summary, { srcLang, dstLang })
+        : "",
+      details: details
+        ? await translateTextCached(details, { srcLang, dstLang })
+        : "",
+    };
+  }
+  // Single provider call with strict JSON output
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    generationConfig: { temperature: 0, maxOutputTokens: 1024 },
+  });
+  const prompt = [
+    `Translate the JSON fields from ${srcLang || "auto"} to ${providerTarget(
+      dstLang
+    )}.`,
+    'Return ONLY minified JSON with keys "title","summary","details".',
+    `Example output: {"title":"..","summary":"..","details":".."}`,
+    `Input:`,
+    JSON.stringify({ title, summary, details }),
+  ].join("\n");
+  let raw = "";
+  try {
+    const res = await withTimeout(
+      model.generateContent(prompt),
+      MT_TIMEOUT_MS,
+      "translate fields (gemini)"
+    );
+    const text =
+      res?.response?.text?.() ||
+      res?.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "";
+    raw = String(text || "").trim();
+  } catch (_) {
+    // Fallback to per-string path on provider failure
+    return {
+      title: title
+        ? await translateTextCached(title, { srcLang, dstLang })
+        : "",
+      summary: summary
+        ? await translateTextCached(summary, { srcLang, dstLang })
+        : "",
+      details: details
+        ? await translateTextCached(details, { srcLang, dstLang })
+        : "",
+    };
+  }
+  const jsonStr = raw.replace(/`json|`/g, "").trim();
+  let obj = {};
+  try {
+    obj = JSON.parse(jsonStr);
+  } catch (_) {
+    // Provider returned non-JSON — fallback per-string
+    return {
+      title: title
+        ? await translateTextCached(title, { srcLang, dstLang })
+        : "",
+      summary: summary
+        ? await translateTextCached(summary, { srcLang, dstLang })
+        : "",
+      details: details
+        ? await translateTextCached(details, { srcLang, dstLang })
+        : "",
+    };
+  }
+  const out = {
+    title: String(obj.title ?? "").trim() || title,
+    summary: String(obj.summary ?? "").trim() || summary,
+    details: String(obj.details ?? "").trim() || details,
+  };
+  // Persist to caches and optional DB cache per field
+  const items = [
+    [kTitle, out.title, title],
+    [kSummary, out.summary, summary],
+    [kDetails, out.details, details],
+  ];
+  for (const [k, translated, original] of items) {
+    if (!original || !k) continue;
+    lruSet(k, translated);
+    if (supabase) {
+      try {
+        await withTimeout(
+          supabase
+            .from("translations")
+            .insert({ key: k, src_lang: srcLang, dst_lang: cacheDst, text: translated }),
+          800,
+          "translations insert (fields)"
+        );
+      } catch (_) {}
+    }
+  }
+  return out;
+}

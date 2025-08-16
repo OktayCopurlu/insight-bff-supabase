@@ -9,7 +9,7 @@ import {
   isRtlLang as _isRtl,
   dirFor as _dirFor,
 } from "./src/utils/lang.mjs";
-import { translateTextCached } from "./src/utils/textTranslate.mjs";
+import { translateTextCached, translateFieldsCached } from "./src/utils/textTranslate.mjs";
 
 // Load .env manually (simple parser) if not already loaded
 (function loadEnv() {
@@ -1036,30 +1036,22 @@ async function translateNow(pivot, srcLang, dstLang) {
   // Short-circuit if base language matches (e.g., en vs en-US)
   const base = (t) => (t || "").split("-")[0].toLowerCase();
   if (base(s) === base(d)) return { ...pivot };
-  // Prefer cached text translation when available; fallback to tag
-  const tag = process.env.BFF_TRANSLATION_TAG === "off" ? "" : " [translated]";
-  const ai_title = await translateTextCached(pivot.ai_title || "", {
-    srcLang: s,
-    dstLang: d,
-  }).catch(() => (pivot.ai_title || "") + tag);
-  const ai_summary = await translateTextCached(pivot.ai_summary || "", {
-    srcLang: s,
-    dstLang: d,
-  }).catch(() => (pivot.ai_summary || "") + tag);
-  const ai_details = await translateTextCached(
-    pivot.ai_details || pivot.ai_summary || "",
+  // Prefer single-call translation to reduce provider calls; fallback to per-field helper internally
+  const { title, summary, details } = await translateFieldsCached(
+    {
+      title: pivot.ai_title || "",
+      summary: pivot.ai_summary || "",
+      details: pivot.ai_details || pivot.ai_summary || "",
+    },
     { srcLang: s, dstLang: d }
-  ).catch(() => (pivot.ai_details || pivot.ai_summary || "") + tag);
+  );
   const clean = (v) => (v || "").replace(/\s+$/g, "");
-  const tTitle = clean(ai_title);
-  const tSummary = clean(ai_summary);
-  const tDetails = clean(ai_details);
   return {
     id: pivot.id,
     lang: d,
-    ai_title: tTitle,
-    ai_summary: tSummary,
-    ai_details: tDetails,
+    ai_title: clean(title),
+    ai_summary: clean(summary),
+    ai_details: clean(details),
     is_current: true,
   };
 }
