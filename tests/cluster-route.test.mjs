@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
 import path from "path";
+import { step } from "./testStep.mjs";
 
 // Provide minimal env required by server early
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || "http://localhost:54321";
@@ -263,38 +264,44 @@ import { app } from "../server.mjs";
 
 describe("GET /cluster/:id", () => {
   it("returns 404 for unknown cluster", async () => {
-    // Temporarily override dataset by mocking createClient again for this test
-    // Simplify by requesting a non-existing id
-    const res = await request(app)
-      .get("/cluster/does-not-exist")
-      .set("Accept-Language", "en");
-    expect(res.status).toBe(404);
+    const res = await step("When I request a non-existing cluster", async () =>
+      request(app).get("/cluster/does-not-exist").set("Accept-Language", "en")
+    );
+    await step("Then status is 404", async () => {
+      expect(res.status).toBe(404);
+    });
   });
 
   it("serves cluster with translated text when ?lang=tr-TR", async () => {
-    const res = await request(app).get("/cluster/clu_1?lang=tr-TR");
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("id", "clu_1");
-    expect(res.body.language).toBe("tr-TR");
-    expect(typeof res.body.title).toBe("string");
-    // Response should include timeline and citations arrays
-    expect(Array.isArray(res.body.timeline)).toBe(true);
-    expect(Array.isArray(res.body.citations)).toBe(true);
-    // Verify that translated content is present (mock prefixes Turkish with TR:)
-    const hasTR = [res.body.title, res.body.summary, res.body.ai_details]
-      .filter(Boolean)
-      .some((t) => String(t).includes("TR:"));
-    expect(hasTR).toBe(true);
+    const res = await step("When I request /cluster/clu_1?lang=tr-TR", async () =>
+      request(app).get("/cluster/clu_1?lang=tr-TR")
+    );
+    await step("Then response is translated and has timeline/citations", async () => {
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("id", "clu_1");
+      expect(res.body.language).toBe("tr-TR");
+      expect(typeof res.body.title).toBe("string");
+      expect(Array.isArray(res.body.timeline)).toBe(true);
+      expect(Array.isArray(res.body.citations)).toBe(true);
+      const hasTR = [res.body.title, res.body.summary, res.body.ai_details]
+        .filter(Boolean)
+        .some((t) => String(t).includes("TR:"));
+      expect(hasTR).toBe(true);
+    });
   });
 
   it("returns translated pivot ai_details when it's already rich (no composition)", async () => {
-    const res = await request(app).get("/cluster/clu_2?lang=tr-TR");
-    expect(res.status).toBe(200);
-    expect(res.body.language).toBe("tr-TR");
-    expect(typeof res.body.ai_details).toBe("string");
-    // Should be the translated rich details (prefixed by TR:) and not contain the composed sections
-    expect(res.body.ai_details.startsWith("TR:")).toBe(true);
-    expect(res.body.ai_details.includes("Timeline updates:")).toBe(false);
-    expect(res.body.ai_details.includes("Sources:")).toBe(false);
+    const res = await step(
+      "When I request /cluster/clu_2?lang=tr-TR (rich pivot details)",
+      async () => request(app).get("/cluster/clu_2?lang=tr-TR")
+    );
+    await step("Then ai_details is translated directly without composition", async () => {
+      expect(res.status).toBe(200);
+      expect(res.body.language).toBe("tr-TR");
+      expect(typeof res.body.ai_details).toBe("string");
+      expect(res.body.ai_details.startsWith("TR:")).toBe(true);
+      expect(res.body.ai_details.includes("Timeline updates:")).toBe(false);
+      expect(res.body.ai_details.includes("Sources:")).toBe(false);
+    });
   });
 });

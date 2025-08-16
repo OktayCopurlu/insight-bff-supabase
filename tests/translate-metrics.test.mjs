@@ -3,6 +3,7 @@ import {
   translateTextCached,
   translateMetrics,
 } from "../src/utils/textTranslate.mjs";
+import { step } from "./testStep.mjs";
 
 // Ensure no provider is used so we only exercise cache paths
 process.env.LLM_API_KEY = process.env.LLM_API_KEY || "";
@@ -16,16 +17,21 @@ describe("translateMetrics counters", () => {
     const text = `hello world ${Date.now()}`; // unique key per run
     const opts = { srcLang: "en", dstLang: "tr" };
 
-    const first = await translateTextCached(text, opts);
-    expect(typeof first).toBe("string");
-    // After first call, we expect at least one miss
-    expect(translateMetrics.cacheMisses).toBeGreaterThan(baseMisses);
+    const first = await step("When I translate a unique text (miss)", async () =>
+      translateTextCached(text, opts)
+    );
+    await step("Then the first result is a string and misses increase", async () => {
+      expect(typeof first).toBe("string");
+      expect(translateMetrics.cacheMisses).toBeGreaterThan(baseMisses);
+    });
 
-    const second = await translateTextCached(text, opts);
-    expect(second).toBe(first); // served from cache
-    expect(translateMetrics.cacheHits).toBeGreaterThan(baseHits);
-
-    // Provider should not have been called when API key is absent
-    expect(translateMetrics.providerCalls).toBeGreaterThanOrEqual(0);
+    const second = await step("When I translate the same text again (hit)", async () =>
+      translateTextCached(text, opts)
+    );
+    await step("Then it returns from cache and hits increase", async () => {
+      expect(second).toBe(first);
+      expect(translateMetrics.cacheHits).toBeGreaterThan(baseHits);
+      expect(translateMetrics.providerCalls).toBeGreaterThanOrEqual(0);
+    });
   });
 });

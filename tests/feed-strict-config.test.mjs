@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
+import { step } from "./testStep.mjs";
 
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || "http://localhost:54321";
 process.env.SUPABASE_SERVICE_ROLE_KEY =
@@ -223,26 +224,33 @@ import { app } from "../server.mjs";
 
 describe("/feed strict mode and /config", () => {
   it("/feed?strict=1 returns ready cards translated to target", async () => {
-    const res = await request(app).get("/feed?lang=fr&strict=1&limit=5");
-    expect(res.status).toBe(200);
-    const cards = res.body;
-    expect(Array.isArray(cards)).toBe(true);
-    expect(cards.length).toBeGreaterThanOrEqual(1);
-    // Strict path marks items as ready (no pending); we expect title strings present and language fr
-    for (const c of cards) {
-      expect(typeof c.title).toBe("string");
-      expect(c.translation_status).toBe("ready");
-      expect(c.language).toBe("fr");
-    }
+    const res = await step("When I request /feed in strict mode in fr", async () =>
+      request(app).get("/feed?lang=fr&strict=1&limit=5")
+    );
+    await step("Then it returns ready cards in fr language", async () => {
+      expect(res.status).toBe(200);
+      const cards = res.body;
+      expect(Array.isArray(cards)).toBe(true);
+      expect(cards.length).toBeGreaterThanOrEqual(1);
+      for (const c of cards) {
+        expect(typeof c.title).toBe("string");
+        expect(c.translation_status).toBe("ready");
+        expect(c.language).toBe("fr");
+      }
+    });
   });
 
   it("/config?market=CH returns a single market with expected fields", async () => {
-    const res = await request(app).get("/config?market=CH");
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("market", "CH");
-    expect(res.body).toHaveProperty("show_langs");
-    expect(res.body).toHaveProperty("pretranslate_langs");
-    expect(res.body).toHaveProperty("default_lang");
-    expect(res.body).toHaveProperty("pivot_lang", "en");
+    const res = await step("When I request /config?market=CH", async () =>
+      request(app).get("/config?market=CH")
+    );
+    await step("Then market config contains required fields", async () => {
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("market", "CH");
+      expect(res.body).toHaveProperty("show_langs");
+      expect(res.body).toHaveProperty("pretranslate_langs");
+      expect(res.body).toHaveProperty("default_lang");
+      expect(res.body).toHaveProperty("pivot_lang", "en");
+    });
   });
 });

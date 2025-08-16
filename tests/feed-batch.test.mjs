@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
+import { step } from "./testStep.mjs";
 
 // Provide minimal env required by server early
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || "http://localhost:54321";
@@ -221,27 +222,35 @@ describe("/feed and /translate/batch", () => {
   });
 
   it("non-strict /feed marks missing targets as pending and sets header", async () => {
-    const res = await request(app).get("/feed?lang=de");
-    expect(res.status).toBe(200);
-    const header = res.headers["x-pending-cluster-ids"] || "";
-    // We expect clu_a pending (no de target), clu_b ready (has de)
-    expect(header.split(",").filter(Boolean)).toContain("clu_a");
-    const cards = res.body;
-    expect(Array.isArray(cards)).toBe(true);
-    const byId = new Map(cards.map((c) => [c.id, c]));
-    expect(byId.get("clu_a").translation_status).toBe("pending");
-    expect(byId.get("clu_b").translation_status).toBe("ready");
+    const res = await step("When I request /feed?lang=de (non-strict)", async () =>
+      request(app).get("/feed?lang=de")
+    );
+    await step("Then response is 200 and pending header includes clu_a", async () => {
+      expect(res.status).toBe(200);
+      const header = res.headers["x-pending-cluster-ids"] || "";
+      expect(header.split(",").filter(Boolean)).toContain("clu_a");
+    });
+    await step("And cards have mixed statuses (pending/ready)", async () => {
+      const cards = res.body;
+      expect(Array.isArray(cards)).toBe(true);
+      const byId = new Map(cards.map((c) => [c.id, c]));
+      expect(byId.get("clu_a").translation_status).toBe("pending");
+      expect(byId.get("clu_b").translation_status).toBe("ready");
+    });
   });
 
   it("/translate/batch dedupes ids and returns ready results", async () => {
-    const res = await request(app)
-      .post("/translate/batch?lang=de")
-      .send({ ids: ["clu_a", "clu_b", "clu_a"] });
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.results)).toBe(true);
-    const ids = res.body.results.map((r) => r.id).sort();
-    // Unique results only
-    expect(ids).toEqual(["clu_a", "clu_b"]);
-    expect(res.body.failed || []).toEqual([]);
+    const res = await step("When I POST to /translate/batch with duplicate ids", async () =>
+      request(app)
+        .post("/translate/batch?lang=de")
+        .send({ ids: ["clu_a", "clu_b", "clu_a"] })
+    );
+    await step("Then unique results are returned with no failures", async () => {
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.results)).toBe(true);
+      const ids = res.body.results.map((r) => r.id).sort();
+      expect(ids).toEqual(["clu_a", "clu_b"]);
+      expect(res.body.failed || []).toEqual([]);
+    });
   });
 });

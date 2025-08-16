@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
+import { step } from "./testStep.mjs";
 
 // Provide minimal env required by server early
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || "http://localhost:54321";
@@ -203,18 +204,21 @@ describe("translation persistence and base fallback", () => {
   });
 
   it("GET /cluster/:id?lang=tr writes a target row when missing (write-through)", async () => {
-    const res = await request(app).get("/cluster/clu_x?lang=tr");
-    expect(res.status).toBe(200);
-    // Response should be in requested language and contain translated fields
-    expect(res.body.language).toBe("tr");
-    expect(res.body.title.startsWith("TR:")).toBe(true);
-    expect(res.body.summary.startsWith("TR:")).toBe(true);
-    // One insert into cluster_ai with target lang
-    const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
-    expect(ins.length).toBeGreaterThanOrEqual(1);
-    const payload = ins[0].values;
-    expect(payload.lang).toBe("tr");
-    expect(typeof payload.ai_title).toBe("string");
+    const res = await step(
+      "When I GET /cluster/:id?lang=tr with missing target",
+      async () => request(app).get("/cluster/clu_x?lang=tr")
+    );
+    await step("Then response is tr and a target insert happens", async () => {
+      expect(res.status).toBe(200);
+      expect(res.body.language).toBe("tr");
+      expect(res.body.title.startsWith("TR:")).toBe(true);
+      expect(res.body.summary.startsWith("TR:")).toBe(true);
+      const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
+      expect(ins.length).toBeGreaterThanOrEqual(1);
+      const payload = ins[0].values;
+      expect(payload.lang).toBe("tr");
+      expect(typeof payload.ai_title).toBe("string");
+    });
   });
 
   it("GET /cluster/:id?lang=de-CH reuses base 'de' without calling translateFieldsCached", async () => {
@@ -224,15 +228,18 @@ describe("translation persistence and base fallback", () => {
     datasets.cluster_ai_currents[0].ai_summary = "Pivot DE Summary";
     datasets.cluster_ai_currents[0].ai_details = "Pivot DE Details";
 
-    const res = await request(app).get("/cluster/clu_x?lang=de-CH");
-    expect(res.status).toBe(200);
-    expect(res.body.language).toBe("de-CH");
-    // Should not have called provider for same base language
-    expect(tfcSpy).not.toHaveBeenCalled();
-    // But it still persists a target row for de-CH
-    const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
-    expect(ins.length).toBeGreaterThanOrEqual(1);
-    expect(ins[0].values.lang).toBe("de-CH");
+    const res = await step(
+      "When I GET /cluster/:id?lang=de-CH and pivot base is de",
+      async () => request(app).get("/cluster/clu_x?lang=de-CH")
+    );
+    await step("Then provider isn't called and row persists for de-CH", async () => {
+      expect(res.status).toBe(200);
+      expect(res.body.language).toBe("de-CH");
+      expect(tfcSpy).not.toHaveBeenCalled();
+      const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
+      expect(ins.length).toBeGreaterThanOrEqual(1);
+      expect(ins[0].values.lang).toBe("de-CH");
+    });
   });
 
   it("POST /translate/batch persists results for all ids", async () => {
@@ -249,19 +256,16 @@ describe("translation persistence and base fallback", () => {
       created_at: new Date().toISOString(),
       model: "seed",
     });
-
-    const res = await request(app)
-      .post("/translate/batch?lang=tr")
-      .send({ ids: ["clu_x", "clu_y"] });
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.results)).toBe(true);
-    expect(res.body.results.map((r) => r.id).sort()).toEqual([
-      "clu_x",
-      "clu_y",
-    ]);
-    const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
-    // One per cluster (or more if refresh flow happens); at least 2
-    expect(ins.length).toBeGreaterThanOrEqual(2);
+    const res = await step("When I POST /translate/batch for two clusters", async () =>
+      request(app).post("/translate/batch?lang=tr").send({ ids: ["clu_x", "clu_y"] })
+    );
+    await step("Then results include both ids and at least two inserts happen", async () => {
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.results)).toBe(true);
+      expect(res.body.results.map((r) => r.id).sort()).toEqual(["clu_x", "clu_y"]);
+      const ins = calls.inserts.filter((c) => c.table === "cluster_ai");
+      expect(ins.length).toBeGreaterThanOrEqual(2);
+    });
     // cleanup: remove y
     datasets.clusters.pop();
     datasets.cluster_ai_currents = datasets.cluster_ai_currents.filter(
