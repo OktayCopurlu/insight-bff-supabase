@@ -8,7 +8,7 @@ Provides a thin API surface (Edge Functions) for the frontend (news app) to:
 
 1. Fetch clusters and articles (cluster-first, AI enriched via cluster_ai)
 2. Generate / retrieve AI explanations, coverage comparisons (ephemeral), quizzes (placeholder)
-3. Chat about an article context (AI chat)
+3. Chat about an article context (AI chat) — handled by the BFF server (`server.mjs`), not an Edge Function
 4. Manage auth (limited) / future preferences
 
 ## Current State (Post-Extraction)
@@ -30,7 +30,6 @@ Phase 4: Optional feature tables (quizzes, coverage comparisons persistence, cha
 ```
 supabase/
   functions/
-    ai-chat/
     coverage-analyzer/
     news-aggregator/
     news-processor/
@@ -107,7 +106,7 @@ Skip expensive endpoints via env flags (set to `true`): `SKIP_EXPLANATION`, `SKI
 
 ## Integration (Manual REST)
 
-See `scripts/integration-test.http` for ready-made calls (VS Code REST Client).
+See `scripts/integration-test.http` for ready-made calls (VS Code REST Client). For chat, use the BFF endpoint `/cluster/:id/chat`.
 
 ## Next Action Checklist
 

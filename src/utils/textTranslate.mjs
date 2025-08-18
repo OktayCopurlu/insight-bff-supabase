@@ -4,7 +4,7 @@
 
 import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generatePlain, getModelId } from "./gemini.mjs";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -137,34 +137,32 @@ function providerTarget(dstLang) {
   return langName(baseLang(dstLang));
 }
 
-// Gemini client (align with feeder's @google/generative-ai usage)
-const GEMINI_API_KEY = process.env.LLM_API_KEY || process.env.GEMINI_API_KEY;
+// Gemini client via centralized helper (@google/genai)
 const GEMINI_MODEL =
   process.env.LLM_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+const HAS_GEMINI = !!(process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
 
 async function translateViaProvider(text, srcLang, dstLang) {
-  if (!genAI) throw new Error("Gemini API key missing");
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: { temperature: 0, maxOutputTokens: 512 },
-  });
+  if (!HAS_GEMINI) throw new Error("Gemini API key missing");
+  const modelId = getModelId(GEMINI_MODEL);
   const prompt = `Translate the following text from ${
     srcLang || "auto"
   } to ${providerTarget(
     dstLang
   )}. Return only the translation with no extra words or quotes.\n\n${text}`;
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const out =
-    response?.text?.() || response?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const { text: outText } = await generatePlain(prompt, {
+    model: modelId,
+    temperature: 0,
+    maxOutputTokens: 512,
+  });
+  const out = outText || "";
   if (!out) throw new Error("Gemini no translation");
   return out;
 }
 
 function availableProviders() {
   // Single provider: Gemini only
-  return GEMINI_API_KEY ? ["gemini"] : [];
+  return HAS_GEMINI ? ["gemini"] : [];
 }
 
 async function attemptTranslateWithRetries(text, srcLang, dstLang) {
@@ -342,7 +340,7 @@ export async function translateFieldsCached(
     };
   }
   // No provider? Fallback to per-string path
-  if (!genAI) {
+  if (!HAS_GEMINI) {
     return {
       title: title
         ? await translateTextCached(title, { srcLang, dstLang })
@@ -356,10 +354,7 @@ export async function translateFieldsCached(
     };
   }
   // Single provider call with strict JSON output
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: { temperature: 0, maxOutputTokens: 1024 },
-  });
+  const modelId = getModelId(GEMINI_MODEL);
   const prompt = [
     `Translate the JSON fields from ${srcLang || "auto"} to ${providerTarget(
       dstLang
@@ -374,16 +369,16 @@ export async function translateFieldsCached(
     const t0 = Date.now();
     translateMetrics.providerCalls += 1;
     const res = await withTimeout(
-      model.generateContent(prompt),
+      generatePlain(prompt, {
+        model: modelId,
+        temperature: 0,
+        maxOutputTokens: 1024,
+      }),
       MT_TIMEOUT_MS,
       "translate fields (gemini)"
     );
     _recordLatency(Date.now() - t0);
-    const text =
-      res?.response?.text?.() ||
-      res?.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "";
-    raw = String(text || "").trim();
+    raw = String(res?.text || "").trim();
     try {
       console.info("metric: provider.call", {
         latency_ms: translateMetrics.latencyMs.last,

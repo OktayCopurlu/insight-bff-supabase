@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_REF=${PROJECT_REF:-darjwmlcicbrqrmzadxe}
-FUNCS=(news-processor ai-chat coverage-analyzer quiz-generator user-management)
+FUNCS=(news-processor coverage-analyzer quiz-generator user-management)
 
 echo "Checking Supabase CLI auth" >&2
 if ! supabase projects list >/dev/null 2>&1; then

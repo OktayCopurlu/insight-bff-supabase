@@ -47,6 +47,12 @@ serve(async (req) => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ parts: [{ text: comparisonPrompt }] }],
+            googleSearchRetrieval: {
+              dynamicRetrievalConfig: {
+                mode: "MODE_DYNAMIC",
+                dynamicThreshold: 0.7,
+              },
+            },
           }),
         }
       );
@@ -60,6 +66,18 @@ serve(async (req) => {
       } catch {
         comparisonData = { comparisons: [] };
       }
+
+      // optionally surface grounded links if present
+      try {
+        const md = geminiData.candidates?.[0]?.groundingMetadata;
+        const links = (md?.groundingChunks || [])
+          .map((c: any) => c?.web?.uri)
+          .filter(Boolean);
+        if (links?.length) {
+          // Attach as a field for clients to display
+          (comparisonData as any).sources = Array.from(new Set(links));
+        }
+      } catch (_) {}
 
       return new Response(
         JSON.stringify({

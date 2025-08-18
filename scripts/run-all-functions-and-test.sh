@@ -4,7 +4,7 @@ set -euo pipefail
 # Starts multiple supabase functions concurrently and runs Node E2E tests.
 # Usage: npm run test:all-local
 
-FUNCS=(news-processor ai-chat coverage-analyzer quiz-generator)
+FUNCS=(news-processor coverage-analyzer quiz-generator)
 BASE_URL="http://localhost:54321/functions/v1"
 LOG_DIR="/tmp/bff-func-logs"
 mkdir -p "$LOG_DIR"

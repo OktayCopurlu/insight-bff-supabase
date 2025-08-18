@@ -14,6 +14,10 @@ import {
   translateFieldsCached,
   translateMetrics,
 } from "./src/utils/textTranslate.mjs";
+import {
+  generateWithSearch,
+  extractGroundingLinks,
+} from "./src/utils/gemini.mjs";
 
 // Load .env manually (simple parser) if not already loaded
 (function loadEnv() {
@@ -191,10 +195,9 @@ app.post("/cluster/:id/chat", langMiddleware, async (req, res) => {
 
   // Try real LLM reply using Gemini when API key is available; fallback to demo template otherwise
   let reply;
-  const apiKey = process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || "";
-  const modelId =
-    process.env.LLM_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash";
-  if (apiKey) {
+  let searchCitations = [];
+  const hasGemini = !!(process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
+  if (hasGemini) {
     try {
       // Gather brief cluster context in target language
       const ensured = await ensureClusterTextInLang(cluster.id, target);
@@ -240,8 +243,10 @@ app.post("/cluster/:id/chat", langMiddleware, async (req, res) => {
       const instructions = [
         `You are a helpful news assistant. Answer in ${target} only.`,
         `Be concise (<= 150 words) unless the user asks for more.`,
-        `Base your answer on the provided cluster summary, timeline, and citations.`,
-        `If uncertain, say you don't have enough info. Do not invent facts.`,
+        `Use the provided context and any grounded web results to answer and cite sources.`,
+        `Do not mention aggregator sources (e.g., Newsdata.io).`,
+        `If context is insufficient, say you don't have enough info; do not claim you cannot search.`,
+        `Do not invent facts. Prefer citing URLs when available.`,
       ].join("\n");
       const summaryPart = ensured?.ai_summary
         ? `Summary: ${ensured.ai_summary}`
@@ -258,22 +263,41 @@ app.post("/cluster/:id/chat", langMiddleware, async (req, res) => {
         .filter(Boolean)
         .join("\n\n");
 
-      const { GoogleGenerativeAI } = await import("@google/generative-ai");
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: modelId });
       const prompt = [
         instructions,
         `Question: ${message}`,
         context ? `\n\nContext:\n${context}` : "",
       ].join("\n\n");
       const resp = await withTimeout(
-        model.generateContent(prompt),
-        8000,
+        generateWithSearch(prompt, {
+          useGoogleSearch: true,
+          // Do not set dynamicRetrieval when googleSearch is on
+          model: process.env.LLM_MODEL || process.env.GEMINI_MODEL,
+          temperature: 0.4,
+        }),
+        10000,
         "gemini chat"
       );
-      const txt = resp?.response?.text?.() || "";
+      let txt = resp?.text || "";
+      // Sanitize bracketed aggregator mentions like [Newsdata.io ...]
+      txt = txt.replace(/\[[^\]]*newsdata[^\]]*\]/gi, "");
       reply = (txt || "").trim();
       if (!reply) throw new Error("empty gemini reply");
+      // Attach grounded links into citations when available
+      try {
+        const links = extractGroundingLinks(resp?.grounding);
+        if (Array.isArray(links) && links.length) {
+          searchCitations = links.slice(0, 5).map((u, i) => ({
+            id: `g${i + 1}`,
+            title: null,
+            url: u,
+            source_id: null,
+            source_name: "Google Search",
+          }));
+        }
+        // Surface grounding mode for debugging
+        if (resp?.mode) res.setHeader("X-Grounding-Mode", resp.mode);
+      } catch (_) {}
     } catch (e) {
       console.warn("[chat] gemini failed, falling back to demo:", e.message);
     }
@@ -294,12 +318,33 @@ app.post("/cluster/:id/chat", langMiddleware, async (req, res) => {
     timestamp: new Date().toISOString(),
   });
   chats.set(key, history);
-  // Include top citations for grounding
-  let citations = [];
+  // Include top citations for grounding (include any search-grounded links from earlier if present)
+  let finalCitations = [];
   try {
-    citations = await getClusterCitations(id, 3);
+    finalCitations = await getClusterCitations(id, 3);
   } catch (_) {}
-  res.json({ messages: history, citations });
+  // The earlier block may have set search-grounded links
+  if (Array.isArray(searchCitations) && searchCitations.length) {
+    // Prepend grounded links; avoid duplicates by URL
+    const seen = new Set();
+    const merged = [];
+    for (const c of searchCitations) {
+      const k = c.url || c.id;
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        merged.push(c);
+      }
+    }
+    for (const c of finalCitations) {
+      const k = c.url || c.id;
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        merged.push(c);
+      }
+    }
+    finalCitations = merged;
+  }
+  res.json({ messages: history, citations: finalCitations });
 });
 app.get("/cluster/:id/chat", (req, res) => {
   const key = `cluster:${req.params.id}`;
