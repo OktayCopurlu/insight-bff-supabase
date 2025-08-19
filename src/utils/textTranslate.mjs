@@ -339,6 +339,21 @@ export async function translateFieldsCached(
       details: hitDetails || details,
     };
   }
+  // If details is long, avoid single-call JSON translation and use the
+  // chunking-aware per-string path to improve reliability for very long bodies.
+  const needsChunkedDetails = (details || "").length >= MT_CHUNK_THRESHOLD;
+  if (needsChunkedDetails) {
+    const [tt, ss, dd] = await Promise.all([
+      title ? translateTextCached(title, { srcLang, dstLang }) : "",
+      summary ? translateTextCached(summary, { srcLang, dstLang }) : "",
+      translateTextCached(details, { srcLang, dstLang }),
+    ]);
+    return {
+      title: String(tt || title || "").trim(),
+      summary: String(ss || summary || "").trim(),
+      details: String(dd || "").trim(),
+    };
+  }
   // No provider? Fallback to per-string path
   if (!HAS_GEMINI) {
     return {

@@ -100,6 +100,33 @@ function withTimeout(promiseLike, ms, label = "operation") {
   ]);
 }
 
+// Minimal HTML entity decoder for display hygiene
+function decodeHtmlEntities(text) {
+  if (text == null) return "";
+  let s = String(text);
+  s = s.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+    try {
+      return String.fromCodePoint(parseInt(hex, 16));
+    } catch {
+      return _;
+    }
+  });
+  s = s.replace(/&#([0-9]+);/g, (_, dec) => {
+    try {
+      return String.fromCodePoint(parseInt(dec, 10));
+    } catch {
+      return _;
+    }
+  });
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
 // Removed: legacy /articles demo fallback and routes
 
 // Light ID generator for demo entities
@@ -140,6 +167,80 @@ app.get("/health", (_req, res) => {
     service: "insight-bff",
     time: new Date().toISOString(),
   });
+});
+
+// -------------------- Article raw body endpoints --------------------
+// GET /article/:id -> returns { id, language, full_text }
+app.get("/article/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: art, error } = await withTimeout(
+      supabase
+        .from("articles")
+        .select("id,language,full_text")
+        .eq("id", id)
+        .maybeSingle(),
+      2000,
+      "article full_text"
+    );
+    if (error) throw error;
+    if (!art) return res.status(404).json({ error: "not_found" });
+    res.json({
+      id: art.id,
+      language: normalizeBcp47(art.language || ""),
+      full_text: decodeHtmlEntities(art.full_text || ""),
+    });
+  } catch (e) {
+    res.status(500).json({ error: "failed_to_fetch" });
+  }
+});
+
+// GET /article/:id/body?lang=xx -> returns body in requested language using translation cache when needed
+app.get("/article/:id/body", langMiddleware, async (req, res) => {
+  const target = req.lang;
+  const base = (t) => (t || "").split("-")[0].toLowerCase();
+  try {
+    const { id } = req.params;
+    const { data: art, error } = await withTimeout(
+      supabase
+        .from("articles")
+        .select("id,language,full_text")
+        .eq("id", id)
+        .maybeSingle(),
+      2000,
+      "article body"
+    );
+    if (error) throw error;
+    if (!art) return res.status(404).json({ error: "not_found" });
+    const src = normalizeBcp47(art.language || "");
+    let body = decodeHtmlEntities(art.full_text || "");
+    let isTranslated = false;
+    let translatedFrom = null;
+    if (body && src && base(src) !== base(target)) {
+      try {
+        body = await translateTextCached(body, {
+          srcLang: src,
+          dstLang: target,
+        });
+        isTranslated = true;
+        translatedFrom = src;
+      } catch (_) {
+        // best-effort: return original if provider/cache failed
+        isTranslated = false;
+        translatedFrom = null;
+      }
+    }
+    res.json({
+      id: art.id,
+      language: target,
+      body,
+      is_translated: isTranslated,
+      translated_from: translatedFrom,
+      dir: dirFor(target),
+    });
+  } catch (e) {
+    res.status(500).json({ error: "failed_to_fetch" });
+  }
 });
 
 // Simple auth middleware using in-memory token store
@@ -558,6 +659,7 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
       const samePivotSig =
         (useRow.pivot_hash && useRow.pivot_hash === pivotSig) ||
         modelTag.includes(`#ph=${pivotSig}`);
+      const isOrigBody = modelTag.includes("#body=orig");
       if (
         (samePivotSig || tCreated >= pCreated) &&
         !needsRefreshTitle &&
@@ -565,6 +667,49 @@ async function ensureClusterTextInLang(clusterId, targetLang) {
         !needsRefreshDetails &&
         !hasStubMarker
       ) {
+        // Special-case: when the current row carries original body (#body=orig)
+        // and caller requests the same language (e.g., en), create and persist
+        // a translated current row for that language so DB holds the translation.
+        if (isOrigBody && base(useRow.lang) === baseTarget) {
+          const translated = await translateNow(pivot, "auto", targetLang);
+          // Flip existing current rows for this lang to false (including the orig-body row)
+          try {
+            await supabase
+              .from("cluster_ai")
+              .update({ is_current: false })
+              .eq("cluster_id", clusterId)
+              .eq("lang", targetLang)
+              .eq("is_current", true);
+          } catch (_) {}
+          // Insert the translated row as current, tagging pivot hash
+          try {
+            await supabase.from("cluster_ai").insert({
+              cluster_id: clusterId,
+              lang: targetLang,
+              ai_title: translated.ai_title,
+              ai_summary: translated.ai_summary,
+              ai_details: translated.ai_details,
+              model: `bff-stub#ph=${pivotSig}`,
+              pivot_hash: pivotSig,
+              is_current: true,
+            });
+          } catch (insErr) {
+            await supabase.from("cluster_ai").insert({
+              cluster_id: clusterId,
+              lang: targetLang,
+              ai_title: translated.ai_title,
+              ai_summary: translated.ai_summary,
+              ai_details: translated.ai_details,
+              model: `bff-stub#ph=${pivotSig}`,
+              is_current: true,
+            });
+          }
+          return {
+            ...translated,
+            is_translated: true,
+            translated_from: pivot.lang,
+          };
+        }
         // Fresh enough
         return {
           ...useRow,
@@ -661,7 +806,8 @@ async function translateNow(pivot, srcLang, dstLang) {
   if (!d || s === d) return { ...pivot };
   // Short-circuit if base language matches (e.g., en vs en-US)
   const base = (t) => (t || "").split("-")[0].toLowerCase();
-  if (base(s) === base(d)) return { ...pivot };
+  const isOrigBody = (pivot.model || "").includes("#body=orig");
+  if (!isOrigBody && base(s) === base(d)) return { ...pivot };
   // Prefer single-call translation to reduce provider calls; fallback to per-field helper internally
   const { title, summary, details } = await translateFieldsCached(
     {
@@ -669,7 +815,7 @@ async function translateNow(pivot, srcLang, dstLang) {
       summary: pivot.ai_summary || "",
       details: pivot.ai_details || pivot.ai_summary || "",
     },
-    { srcLang: s, dstLang: d }
+    { srcLang: isOrigBody ? "auto" : s, dstLang: d }
   );
   const clean = (v) => (v || "").replace(/\s+$/g, "");
   return {
@@ -1217,15 +1363,18 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
     const citations = await getClusterCitations(id, 3);
 
     // Compose richer details when ai_details is missing or too short
+    const cleanTitle = decodeHtmlEntities(ensured.ai_title || "");
+    const cleanSummary = decodeHtmlEntities(ensured.ai_summary || "");
+    const cleanDetails = decodeHtmlEntities(ensured.ai_details || "");
     const strip = (s) => (s || "").replace(/\s+/g, " ").trim();
     const sameAsSummary =
-      strip(ensured.ai_details) && strip(ensured.ai_summary)
-        ? strip(ensured.ai_details) === strip(ensured.ai_summary)
+      strip(cleanDetails) && strip(cleanSummary)
+        ? strip(cleanDetails) === strip(cleanSummary)
         : false;
-    let composedDetails = ensured.ai_details || "";
+    let composedDetails = cleanDetails || "";
     if (!composedDetails || composedDetails.length < 240 || sameAsSummary) {
       const parts = [];
-      if (ensured.ai_summary) parts.push(ensured.ai_summary.trim());
+      if (cleanSummary) parts.push(cleanSummary.trim());
       if (upTranslated && upTranslated.length) {
         const top = upTranslated.slice(0, 5); // cap to avoid very long responses
         const bullets = top.map((u) => `• ${u.text}`).join("\n");
@@ -1237,13 +1386,13 @@ app.get("/cluster/:id", langMiddleware, async (req, res) => {
           .join("\n");
         parts.push("\nSources:\n" + cites);
       }
-      composedDetails = parts.filter(Boolean).join("\n\n");
+      composedDetails = decodeHtmlEntities(parts.filter(Boolean).join("\n\n"));
     }
 
     res.json({
       id: cluster.id,
-      title: ensured.ai_title,
-      summary: ensured.ai_summary,
+      title: cleanTitle,
+      summary: cleanSummary,
       ai_details: composedDetails,
       language: target,
       is_translated: ensured.is_translated || false,

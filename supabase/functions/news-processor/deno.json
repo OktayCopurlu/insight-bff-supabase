@@ -1,6 +1,0 @@
-{
-  "imports": {},
-  "deploy": {
-    "verify_jwt": false
-  }
-}

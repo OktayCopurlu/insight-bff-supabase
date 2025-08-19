@@ -1,1 +1,0 @@
--- (No-op) Legacy auxiliary tables removed for ingestion-only schema focus. File retained as empty.
