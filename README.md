@@ -1,6 +1,6 @@
 # Insight BFF (Supabase Edge Functions)
 
-Backend-for-Frontend layer extracted from the original `Insight-frontend/supabase` directory.
+Backend-for-Frontend layer extracted from the original `news-web-app-1/supabase` (formerly `Insight-frontend`) directory.
 
 ## Purpose
 
