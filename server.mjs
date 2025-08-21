@@ -169,27 +169,84 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// -------------------- Article raw body endpoints --------------------
-// GET /article/:id -> returns { id, language, full_text }
-app.get("/article/:id", async (req, res) => {
+// -------------------- Article endpoints --------------------
+// GET /article/:id -> returns combined fields from articles + articles_translations
+app.get("/article/:id", langMiddleware, async (req, res) => {
+  const target = req.lang;
+  const base = (t) => (t || "").split("-")[0].toLowerCase();
   try {
     const { id } = req.params;
+    // 1) Fetch base article for shared fields and source language
     const { data: art, error } = await withTimeout(
       supabase
         .from("articles")
-        .select("id,language,full_text")
+        .select(
+          "id,lang,image_url,url,canonical_url,published_at,source_id,title,snippet"
+        )
         .eq("id", id)
         .maybeSingle(),
       2000,
-      "article full_text"
+      "article base"
     );
     if (error) throw error;
     if (!art) return res.status(404).json({ error: "not_found" });
-    res.json({
+
+    const src = normalizeBcp47(art.lang || "");
+    const baseTarget = base(target);
+
+    // 2) Prefer exact translation row, then base(target), then source language row
+    const tryGet = async (lang) => {
+      const { data } = await withTimeout(
+        supabase
+          .from("articles_translations")
+          .select("dst_lang,headline,summary_ai,text_html")
+          .eq("article_id", id)
+          .eq("dst_lang", lang)
+          .maybeSingle(),
+        1500,
+        `translation ${lang}`
+      );
+      return data || null;
+    };
+    let tr = await tryGet(target);
+    if (!tr && baseTarget && baseTarget !== target)
+      tr = await tryGet(baseTarget);
+    if (!tr && src) tr = await tryGet(base(src));
+    // Last resort: any translation row
+    if (!tr) {
+      try {
+        const { data } = await withTimeout(
+          supabase
+            .from("articles_translations")
+            .select("dst_lang,headline,summary_ai,text_html")
+            .eq("article_id", id)
+            .limit(1),
+          1000,
+          "translation any"
+        );
+        tr = (data && data[0]) || null;
+      } catch (_) {}
+    }
+    if (!tr) return res.status(404).json({ error: "no_translation" });
+
+    const used = normalizeBcp47(tr.dst_lang || src || target);
+    const isTranslated = base(used) !== base(src);
+    const result = {
       id: art.id,
-      language: normalizeBcp47(art.language || ""),
-      full_text: decodeHtmlEntities(art.full_text || ""),
-    });
+      language: used,
+      headline: decodeHtmlEntities(tr.headline || art.title || ""),
+      summary: decodeHtmlEntities(tr.summary_ai || art.snippet || ""),
+      body: tr.text_html || "",
+      url: art.canonical_url || art.url,
+      canonical_url: art.canonical_url || null,
+      image_url: art.image_url || null,
+      published_at: art.published_at || null,
+      source_id: art.source_id || null,
+      dir: dirFor(used),
+      is_translated: isTranslated,
+      translated_from: isTranslated ? src || null : null,
+    };
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: "failed_to_fetch" });
   }
@@ -201,42 +258,46 @@ app.get("/article/:id/body", langMiddleware, async (req, res) => {
   const base = (t) => (t || "").split("-")[0].toLowerCase();
   try {
     const { id } = req.params;
+    // Base article for source language
     const { data: art, error } = await withTimeout(
-      supabase
-        .from("articles")
-        .select("id,language,full_text")
-        .eq("id", id)
-        .maybeSingle(),
+      supabase.from("articles").select("id,lang").eq("id", id).maybeSingle(),
       2000,
-      "article body"
+      "article body base"
     );
     if (error) throw error;
     if (!art) return res.status(404).json({ error: "not_found" });
-    const src = normalizeBcp47(art.language || "");
-    let body = decodeHtmlEntities(art.full_text || "");
-    let isTranslated = false;
-    let translatedFrom = null;
-    if (body && src && base(src) !== base(target)) {
-      try {
-        body = await translateTextCached(body, {
-          srcLang: src,
-          dstLang: target,
-        });
-        isTranslated = true;
-        translatedFrom = src;
-      } catch (_) {
-        // best-effort: return original if provider/cache failed
-        isTranslated = false;
-        translatedFrom = null;
-      }
-    }
+    const src = normalizeBcp47(art.lang || "");
+    const baseTarget = base(target);
+
+    const tryGet = async (lang) => {
+      const { data } = await withTimeout(
+        supabase
+          .from("articles_translations")
+          .select("dst_lang,text_html")
+          .eq("article_id", id)
+          .eq("dst_lang", lang)
+          .maybeSingle(),
+        1500,
+        `translation body ${lang}`
+      );
+      return data || null;
+    };
+
+    let tr = await tryGet(target);
+    if (!tr && baseTarget && baseTarget !== target)
+      tr = await tryGet(baseTarget);
+    if (!tr && src) tr = await tryGet(base(src));
+    if (!tr) return res.status(404).json({ error: "no_translation" });
+
+    const used = normalizeBcp47(tr.dst_lang || src || target);
+    const isTranslated = base(used) !== base(src);
     res.json({
       id: art.id,
-      language: target,
-      body,
+      language: used,
+      body: tr.text_html || "",
       is_translated: isTranslated,
-      translated_from: translatedFrom,
-      dir: dirFor(target),
+      translated_from: isTranslated ? src || null : null,
+      dir: dirFor(used),
     });
   } catch (e) {
     res.status(500).json({ error: "failed_to_fetch" });
@@ -927,291 +988,169 @@ async function getClusterTextInLangNonBlocking(clusterId, targetLang) {
 }
 
 // GET /feed?lang=de-CH&limit=...
+// Helper to get best translation row for an article id with fallback
+async function getBestArticleTranslation(articleId, target) {
+  const base = (t) => (t || "").split("-")[0].toLowerCase();
+  const baseTarget = base(target);
+  const tryGet = async (lang) => {
+    const { data } = await withTimeout(
+      supabase
+        .from("articles_translations")
+        .select("dst_lang,headline,summary_ai,text_html")
+        .eq("article_id", articleId)
+        .eq("dst_lang", lang)
+        .maybeSingle(),
+      1200,
+      `best tr ${lang}`
+    );
+    return data || null;
+  };
+  let tr = await tryGet(target);
+  if (!tr && baseTarget && baseTarget !== target) tr = await tryGet(baseTarget);
+  if (!tr) {
+    try {
+      const { data: any } = await withTimeout(
+        supabase
+          .from("articles_translations")
+          .select("dst_lang,headline,summary_ai,text_html")
+          .eq("article_id", articleId)
+          .limit(1),
+        800,
+        "best tr any"
+      );
+      tr = (any && any[0]) || null;
+    } catch (_) {}
+  }
+  return tr;
+}
+
 app.get("/feed", langMiddleware, async (req, res) => {
   bffMetrics.feed.requests += 1;
   const target = req.lang;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const strict = String(req.query.strict || "").toLowerCase();
-  const waitTranslations =
-    strict === "1" || strict === "true" || strict === "yes";
-  // Adaptive DB timeouts: allow more time in strict mode
+  const waitTranslations = strict === "1" || strict === "true";
   const DB_T_MS = waitTranslations ? 8000 : 2000;
   const DB_T_FAST_MS = waitTranslations ? 4000 : 1500;
-  // In strict mode, cap the number of items to keep response time reasonable
   const effectiveLimit = waitTranslations ? Math.min(limit, 8) : limit;
-  // Overall time budget for strict mode (keep under FE wait window)
-  const STRICT_BUDGET_MS = parseInt(
-    process.env.FEED_STRICT_BUDGET_MS || "12000"
-  );
-  const overallDeadline = waitTranslations ? Date.now() + STRICT_BUDGET_MS : 0;
   try {
-    const t0 = Date.now();
-    // Recent clusters: order by rep_article.published_at desc when possible
-    const { data: clusters, error: clErr } = await withTimeout(
-      supabase
-        .from("clusters")
-        .select("id,rep_article")
-        .limit(effectiveLimit * 3),
-      DB_T_MS,
-      "clusters list"
-    );
-    if (clErr) throw clErr;
-    if (!clusters || !clusters.length) return res.json([]);
-
-    // Get rep articles to sort and fetch thumbnails
-    const repIds = clusters.map((c) => c.rep_article).filter(Boolean);
-    const { data: repArticles } = await withTimeout(
+    // Pull recent articles
+    const { data: arts, error } = await withTimeout(
       supabase
         .from("articles")
-        .select("id,title,snippet,published_at,language")
-        .in("id", repIds.length ? repIds : ["__none__"]),
+        .select("id,title,snippet,published_at,lang,image_url")
+        .order("published_at", { ascending: false })
+        .limit(effectiveLimit * 2),
       DB_T_MS,
-      "rep articles"
+      "articles list"
     );
-    const repMap = new Map((repArticles || []).map((a) => [a.id, a]));
-    const ordered = [...clusters].sort((a, b) => {
-      const pa = repMap.get(a.rep_article)?.published_at || "";
-      const pb = repMap.get(b.rep_article)?.published_at || "";
-      return pa > pb ? -1 : 1;
-    });
+    if (error) throw error;
+    if (!arts || !arts.length) return res.json([]);
 
-    const picked = ordered.slice(0, effectiveLimit);
-    const clusterIds = picked.map((c) => c.id);
-
-    // Preload thumb urls for reps
-    const { data: mediaLinks } = await withTimeout(
-      supabase
-        .from("article_media")
-        .select("article_id,media_id,role")
-        .in("article_id", repIds.length ? repIds : ["__none__"])
-        .eq("role", "thumbnail"),
-      DB_T_FAST_MS,
-      "thumb links"
-    );
-    const mediaIds = (mediaLinks || []).map((m) => m.media_id);
-    const { data: assets } = await withTimeout(
-      supabase
-        .from("media_assets")
-        .select("id,url")
-        .in("id", mediaIds.length ? mediaIds : ["__none__"]),
-      DB_T_FAST_MS,
-      "thumb assets"
-    );
-    const mediaMap = new Map((assets || []).map((m) => [m.id, m.url]));
-    const thumbByArticle = new Map();
-    (mediaLinks || []).forEach((m) => {
-      if (!thumbByArticle.has(m.article_id))
-        thumbByArticle.set(m.article_id, mediaMap.get(m.media_id) || null);
-    });
-
-    // Derive categories for representative articles (used for FE filters)
-    let repCatLinks = [];
+    const ids = arts.map((a) => a.id);
+    // Preload media (first by sort_index, else any)
+    let mediaByArticle = new Map();
     try {
-      const { data } = await withTimeout(
+      const { data: media } = await withTimeout(
         supabase
-          .from("article_categories")
-          .select("article_id,category_id")
-          .in("article_id", repIds.length ? repIds : ["__none__"]),
+          .from("article_media")
+          .select("article_id,url,type,sort_index")
+          .in("article_id", ids.length ? ids : ["__none__"]),
         DB_T_FAST_MS,
-        "rep categories"
+        "article media"
       );
-      repCatLinks = data || [];
-    } catch (e) {
-      console.warn("rep categories warn", e.message);
-    }
-    const repCatIds = [
-      ...new Set((repCatLinks || []).map((c) => c.category_id).filter(Boolean)),
-    ];
-    let repCategories = [];
-    try {
-      if (repCatIds.length) {
-        const { data } = await withTimeout(
-          supabase
-            .from("categories")
-            .select("id,path")
-            .in("id", repCatIds.length ? repCatIds : ["__none__"]),
-          DB_T_FAST_MS,
-          "categories"
-        );
-        repCategories = data || [];
-      }
-    } catch (e) {
-      console.warn("categories fetch warn", e.message);
-    }
-    const repCatPath = new Map(repCategories.map((c) => [c.id, c.path]));
-    const catsByArticle = new Map();
-    (repCatLinks || []).forEach((cl) => {
-      const list = catsByArticle.get(cl.article_id) || [];
-      const p = repCatPath.get(cl.category_id);
-      if (p) list.push(p);
-      catsByArticle.set(cl.article_id, list);
-    });
-
-    // Coverage counts per cluster (batched)
-    const coverageCounts = new Map();
-    try {
-      const { data: artsAll } = await withTimeout(
-        supabase
-          .from("articles")
-          .select("cluster_id")
-          .in("cluster_id", clusterIds.length ? clusterIds : ["__none__"]),
-        DB_T_FAST_MS,
-        "coverage counts"
-      );
-      (artsAll || []).forEach((a) =>
-        coverageCounts.set(
-          a.cluster_id,
-          (coverageCounts.get(a.cluster_id) || 0) + 1
-        )
+      const temp = new Map();
+      (media || []).forEach((m) => {
+        const list = temp.get(m.article_id) || [];
+        list.push(m);
+        temp.set(m.article_id, list);
+      });
+      mediaByArticle = new Map(
+        [...temp.entries()].map(([aid, list]) => {
+          const sorted = list.sort(
+            (a, b) => (a.sort_index || 0) - (b.sort_index || 0)
+          );
+          const pick =
+            sorted.find((x) => x.type === "thumbnail") || sorted[0] || null;
+          return [aid, pick?.url || null];
+        })
       );
     } catch (_) {}
 
-    // Assemble cards with language selection/translation
-    const cards = [];
-    if (waitTranslations) {
-      // In strict mode, try to resolve multiple translations in parallel within the remaining budget
-      const buildCardsFromEnsured = (ensuredMap) => {
-        for (const c of picked) {
-          const ensured = ensuredMap.get(c.id);
-          if (!ensured) continue;
-          const repThumb = thumbByArticle.get(c.rep_article) || null;
-          const repCats = catsByArticle.get(c.rep_article) || [];
-          cards.push({
-            id: c.id,
-            title: ensured.ai_title,
-            summary: ensured.ai_summary,
-            language: target,
-            is_translated: ensured.is_translated || false,
-            translated_from: ensured.translated_from || null,
-            dir: dirFor(target),
-            coverage_count: coverageCounts.get(c.id) || 1,
-            image_url: repThumb,
-            category: repCats[0] || "general",
-            tags: repCats,
-            translation_status: "ready",
-          });
-        }
-      };
-
-      const attemptBatch = async (capMs) => {
-        const ensuredMap = new Map();
-        const promises = picked.map((c) =>
-          withTimeout(
-            ensureClusterTextInLangDedup(c.id, target),
-            capMs,
-            `ensure cluster ${c.id}`
-          )
-            .then((ensured) => ({ ok: true, id: c.id, ensured }))
-            .catch(() => ({ ok: false, id: c.id }))
+    // Preload categories (use slug or name as tags)
+    let catsByArticle = new Map();
+    try {
+      const { data: links } = await withTimeout(
+        supabase
+          .from("article_categories")
+          .select("article_id,category_id")
+          .in("article_id", ids.length ? ids : ["__none__"]),
+        DB_T_FAST_MS,
+        "article categories"
+      );
+      const catIds = [
+        ...new Set((links || []).map((l) => l.category_id).filter(Boolean)),
+      ];
+      let map = new Map();
+      if (catIds.length) {
+        const { data: cats } = await withTimeout(
+          supabase.from("categories").select("id,slug,name").in("id", catIds),
+          DB_T_FAST_MS,
+          "categories"
         );
-        const settled = await Promise.allSettled(promises);
-        for (const s of settled) {
-          if (s.status === "fulfilled" && s.value.ok && s.value.ensured) {
-            ensuredMap.set(s.value.id, s.value.ensured);
-          }
-        }
-        buildCardsFromEnsured(ensuredMap);
-      };
+        map = new Map((cats || []).map((c) => [c.id, c.slug || c.name]));
+      }
+      const agg = new Map();
+      (links || []).forEach((l) => {
+        const list = agg.get(l.article_id) || [];
+        const tag = map.get(l.category_id);
+        if (tag) list.push(tag);
+        agg.set(l.article_id, list);
+      });
+      catsByArticle = agg;
+    } catch (_) {}
 
-      // First pass with a conservative per-item cap within remaining budget
-      let remaining = Math.max(0, overallDeadline - Date.now());
-      if (remaining > 0) {
-        const cap1 = Math.max(1500, Math.min(3000, remaining));
-        await attemptBatch(cap1);
+    const cards = [];
+    for (const a of arts.slice(0, effectiveLimit)) {
+      const tr = await getBestArticleTranslation(a.id, target);
+      if (!tr) {
+        if (waitTranslations) continue; // skip in strict mode
+        // non-strict: show placeholder with pending status
+        cards.push({
+          id: a.id,
+          title: a.title || null,
+          summary: a.snippet || null,
+          language: target,
+          dir: dirFor(target),
+          is_translated: false,
+          translated_from: null,
+          image_url: mediaByArticle.get(a.id) || a.image_url || null,
+          category: (catsByArticle.get(a.id) || [])[0] || "general",
+          tags: catsByArticle.get(a.id) || [],
+          coverage_count: 1,
+          translation_status: "pending",
+          published_at: a.published_at || null,
+        });
+        continue;
       }
-      // If still empty and time remains, try a second pass with a slightly higher cap
-      remaining = Math.max(0, overallDeadline - Date.now());
-      if (cards.length === 0 && remaining > 0) {
-        const cap2 = Math.max(2000, Math.min(5000, remaining));
-        await attemptBatch(cap2);
-      }
-    } else {
-      // Non-strict: fast path — return ready targets; mark others as pending (no pivot leakage)
-      const pendingIds = [];
-      for (const c of picked) {
-        let ensured = null;
-        try {
-          let data = null;
-          let resp = await withTimeout(
-            supabase
-              .from("cluster_ai")
-              .select(
-                "id,lang,ai_title,ai_summary,ai_details,is_current,created_at"
-              )
-              .eq("cluster_id", c.id)
-              .eq("lang", target)
-              .eq("is_current", true)
-              .maybeSingle(),
-            DB_T_FAST_MS,
-            "cluster_ai target (feed)"
-          );
-          data = resp?.data || null;
-          if (!data) {
-            // Fallback to base language row
-            const base = (t) => (t || "").split("-")[0].toLowerCase();
-            const baseTarget = base(target);
-            if (baseTarget && baseTarget !== target) {
-              resp = await withTimeout(
-                supabase
-                  .from("cluster_ai")
-                  .select(
-                    "id,lang,ai_title,ai_summary,ai_details,is_current,created_at"
-                  )
-                  .eq("cluster_id", c.id)
-                  .eq("lang", baseTarget)
-                  .eq("is_current", true)
-                  .maybeSingle(),
-                DB_T_FAST_MS,
-                "cluster_ai base (feed)"
-              );
-              data = resp?.data || null;
-            }
-          }
-          ensured = data || null;
-        } catch (_) {}
-        const repThumb = thumbByArticle.get(c.rep_article) || null;
-        const repCats = catsByArticle.get(c.rep_article) || [];
-        if (ensured) {
-          cards.push({
-            id: c.id,
-            title: ensured.ai_title || repMap.get(c.rep_article)?.title || null,
-            summary:
-              ensured.ai_summary || repMap.get(c.rep_article)?.snippet || null,
-            language: target,
-            is_translated: true,
-            translated_from: null,
-            dir: dirFor(target),
-            coverage_count: coverageCounts.get(c.id) || 1,
-            image_url: repThumb,
-            category: repCats[0] || "general",
-            tags: repCats,
-            translation_status: "ready",
-          });
-        } else {
-          pendingIds.push(c.id);
-          // Schedule background persistence
-          _enqueuePersist(() => ensureClusterTextInLang(c.id, target));
-          cards.push({
-            id: c.id,
-            title: null,
-            summary: null,
-            language: target,
-            is_translated: false,
-            translated_from: null,
-            dir: dirFor(target),
-            coverage_count: coverageCounts.get(c.id) || 1,
-            image_url: repThumb,
-            category: repCats[0] || "general",
-            tags: repCats,
-            translation_status: "pending",
-          });
-        }
-      }
-      if (pendingIds.length) {
-        try {
-          res.setHeader("X-Pending-Cluster-Ids", pendingIds.join(","));
-        } catch (_) {}
-      }
+      const used = normalizeBcp47(tr.dst_lang || target);
+      const base = (t) => (t || "").split("-")[0].toLowerCase();
+      const isTranslated = a.lang ? base(used) !== base(a.lang) : true;
+      cards.push({
+        id: a.id,
+        title: decodeHtmlEntities(tr.headline || a.title || ""),
+        summary: decodeHtmlEntities(tr.summary_ai || a.snippet || ""),
+        language: used,
+        dir: dirFor(used),
+        is_translated: isTranslated,
+        translated_from: isTranslated ? a.lang || null : null,
+        image_url: mediaByArticle.get(a.id) || a.image_url || null,
+        category: (catsByArticle.get(a.id) || [])[0] || "general",
+        tags: catsByArticle.get(a.id) || [],
+        coverage_count: 1,
+        translation_status: "ready",
+        published_at: a.published_at || null,
+      });
     }
     res.json(cards);
   } catch (err) {
