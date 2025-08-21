@@ -18,6 +18,7 @@ import {
   generateWithSearch,
   extractGroundingLinks,
 } from "./src/utils/gemini.mjs";
+import createCategoryRoutes from "./src/routes/categories.mjs";
 
 // Load .env manually (simple parser) if not already loaded
 (function loadEnv() {
@@ -890,6 +891,18 @@ async function translateNow(pivot, srcLang, dstLang) {
 }
 
 const dirFor = _dirFor;
+
+// -------------------- Category API Routes --------------------
+// Mount category routes with necessary dependencies
+app.use(
+  "/v1/categories",
+  createCategoryRoutes(supabase, {
+    withTimeout,
+    langMiddleware,
+    setLangHeaders,
+    dirFor,
+  })
+);
 
 // In-process deduplication for ensureClusterTextInLang calls
 const _ensureInflight = new Map(); // key -> Promise
